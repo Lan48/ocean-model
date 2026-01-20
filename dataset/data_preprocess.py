@@ -5,9 +5,9 @@ CMIP6 NetCDF to ORCA-DL NPY Converter
 将CMIP6下载的原始NetCDF数据转换为ORCA-DL项目可用的.npy格式训练数据。
 
 使用方法:  
-    python dataset/data_preprocess.py \
-    --input_dir /mnt/data/zhu.yishun/ORCA-DL-main/data/train_data/2015-2029 \
-    --output_dir /mnt/data/zhu.yishun/ORCA-DL-main/data/train_data \
+    python /mnt/data/zhu.yishun/ORCA-DL-main/dataset/data_preprocess.py \
+    --input_dir /mnt/data/zhu.yishun/ssp245_Data \
+    --output_dir /mnt/data/zhu.yishun/ORCA-DL-main/data/2015- \
     --stat_dir /mnt/data/zhu.yishun/ORCA-DL-main/stat \
     --grid_file /mnt/data/zhu.yishun/ORCA-DL-main/grid \
     --zaxis_file /mnt/data/zhu.yishun/ORCA-DL-main/zaxis.txt
@@ -235,76 +235,113 @@ def compute_monthly_stats(data_dir, var_name, output_stat_dir):
     return {'mean': means, 'std': stds}
 
 
-def normalize_data(data, month, stats):
+def normalize_data(data, month, stats, var_name):
     """
-    标准化数据 - 参考ORCA-DL的标准化方法
+    标准化数据，适配不同维度的统计量
     
-    Args: 
+    Args:
         data: 输入数据
         month: 月份 (1-12)
         stats: 统计量字典 {'mean': array, 'std': array}
+        var_name: 变量名（用于调试）
     
     Returns:
         标准化后的数据
     """
-    mean = stats['mean'][month - 1]
-    std = stats['std'][month - 1]
-    
-    # (data - mean) / std
-    normalized = (data - mean) / std
-    
-    # 处理NaN和无穷值
-    normalized = np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0)
-    
-    return normalized.astype(np.float32)
-
+    try:
+        mean = stats['mean'][month - 1]
+        std = stats['std'][month - 1]
+        
+        # 检查维度匹配
+        if data.shape != mean.shape:
+            print(f"  维度不匹配警告: 数据形状 {data.shape} != 统计量形状 {mean.shape}")
+            print(f"  变量: {var_name}, 月份: {month}")
+            
+            # 尝试广播或调整维度（根据具体情况）
+            if len(data.shape) == 2 and len(mean.shape) == 3:
+                # 2D数据 vs 3D统计量 - 取统计量的表层
+                if mean.shape[0] == 16:  # 深度维度
+                    mean = mean[0]  # 取第一个深度层
+                    std = std[0]
+                else:
+                    mean = mean[0]  # 取第一个维度
+                    std = std[0]
+            elif len(data.shape) == 3 and len(mean.shape) == 4:
+                # 3D数据 vs 4D统计量 - 可能需要深度维度匹配
+                if data.shape[0] == mean.shape[1]:  # 深度维度匹配
+                    mean = mean[0]  # 去除月份维度，保留深度、纬度、经度
+                    std = std[0]
+        
+        # 标准化: (data - mean) / std
+        normalized = (data - mean) / std
+        
+        # 处理NaN和无穷值
+        normalized = np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        return normalized.astype(np.float32)
+        
+    except Exception as e:
+        print(f"  标准化失败 {var_name} 月份 {month}: {e}")
+        # 失败时返回原始数据（仅处理NaN）
+        return np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
 def load_existing_stats(stat_dir, var_name):
     """
-    加载已有的统计量文件 (如果使用ORCA-DL提供的统计量)
+    加载已有的统计量文件，支持新的目录结构和变量名映射
     
     Args:
-        stat_dir: 统计量目录
-        var_name: 变量名
+        stat_dir: 统计量目录 (包含mean和std子目录)
+        var_name: CMIP6变量名
     
     Returns:
         dict: {'mean': array, 'std': array} 或 None
     """
-    mean_path = os.path.join(stat_dir, f'{var_name}_mean.npy')
-    std_path = os.path.join(stat_dir, f'{var_name}_std.npy')
+    # CMIP6变量名到统计量文件名的映射
+    var_mapping = {
+        'thetao': 'pottmp',  # 潜在温度
+        'so': 'salt',        # 盐度
+        'uo': 'ucur',        # 东向流速
+        'vo': 'vcur',        # 北向流速
+        'tos': 'sst',        # 海表温度
+        'zos': 'sshg',       # 海表面高度
+        'tauu': 'uflx',      # 东向风应力
+        'tauv': 'vflx'       # 北向风应力
+    }
+    
+    # 获取实际使用的统计量文件名
+    actual_name = var_mapping.get(var_name)
+    
+    if actual_name is None:
+        print(f"  警告: 变量 {var_name} 没有对应的统计量映射，跳过标准化")
+        return None
+    
+    # 构建统计量文件路径 (mean/和std/子目录)
+    mean_path = os.path.join(stat_dir, 'mean', f'{actual_name}.npy')
+    std_path = os.path.join(stat_dir, 'std', f'{actual_name}.npy')
     
     if os.path.exists(mean_path) and os.path.exists(std_path):
-        return {
-            'mean': np.load(mean_path),
-            'std': np.load(std_path)
-        }
-    
-    # 尝试另一种目录结构
-    mean_path = os.path.join(stat_dir, 'mean', f'{var_name}.npy')
-    std_path = os.path.join(stat_dir, 'std', f'{var_name}.npy')
-    
-    if os.path.exists(mean_path) and os.path.exists(std_path):
-        return {
-            'mean': np.load(mean_path),
-            'std':  np.load(std_path)
-        }
-    
-    return None
-
+        try:
+            mean_data = np.load(mean_path)
+            std_data = np.load(std_path)
+            
+            print(f"  加载统计量: {actual_name} (来自 {var_name})")
+            print(f"    均值形状: {mean_data.shape}, 标准差形状: {std_data.shape}")
+            
+            return {
+                'mean': mean_data,
+                'std': std_data
+            }
+        except Exception as e:
+            print(f"  加载统计量文件失败: {e}")
+            return None
+    else:
+        print(f"  警告: 统计量文件不存在 - 均值: {mean_path}, 标准差: {std_path}")
+        return None
 
 def process_nc_file_with_cdo(nc_file, output_base_dir, grid_file, zaxis_file, 
                               stat_dir=None, compute_stats=False, normalize=True):
     """
-    使用CDO处理单个NetCDF文件 (使用本地grid和zaxis文件)
-    
-    Args:
-        nc_file: NetCDF文件路径
-        output_base_dir: 输出基础目录
-        grid_file: 本地grid文件路径
-        zaxis_file: 本地zaxis文件路径
-        stat_dir: 统计量目录 (用于标准化)
-        compute_stats: 是否计算统计量
-        normalize: 是否进行标准化
+    修改后的处理函数，使用新的统计量加载方法
     """
     # 解析文件名
     file_info = parse_filename(nc_file)
@@ -312,22 +349,21 @@ def process_nc_file_with_cdo(nc_file, output_base_dir, grid_file, zaxis_file,
     model_name = file_info['model_name']
     
     print(f"\n处理文件: {os.path.basename(nc_file)}")
-    print(f"  变量:  {var_name}, 模型: {model_name}")
+    print(f"  变量: {var_name}, 模型: {model_name}")
     
     is_3d = var_name in MULTI_LEVEL_VARS
     
-    # 创建临时目录（仅用于插值中间文件，不存放配置文件）
+    # 创建临时目录
     temp_dir = tempfile.mkdtemp()
     
     try:
-        # 使用CDO进行插值（传入本地配置文件路径）
+        # 使用CDO进行插值
         interpolated_file = os.path.join(temp_dir, 'interpolated.nc')
         success = interpolate_with_cdo(nc_file, interpolated_file, var_name, 
                                         grid_file, zaxis_file, is_3d)
         
         if not success:
             print(f"  CDO插值失败，尝试使用scipy插值")
-            # 回退到scipy插值方法
             process_nc_file_scipy(nc_file, output_base_dir, stat_dir, normalize)
             return
         
@@ -335,29 +371,28 @@ def process_nc_file_with_cdo(nc_file, output_base_dir, grid_file, zaxis_file,
         output_dir = os.path.join(output_base_dir, model_name, var_name)
         os.makedirs(output_dir, exist_ok=True)
         
-        # 打开插值后的数据 - 使用use_cftime处理非标准日历
-        ds = xr.open_dataset(interpolated_file, use_cftime=True)
+        # 加载统计量（在循环外加载一次）
+        stats = None
+        if normalize and stat_dir:
+            stats = load_existing_stats(stat_dir, var_name)
+            if stats is None:
+                print(f"  无法加载统计量，跳过标准化")
+                normalize = False
         
-        # 获取变量数据
+        # 打开插值后的数据
+        ds = xr.open_dataset(interpolated_file, use_cftime=True)
         data = ds[var_name]
         
         # 获取时间坐标
         time_coord = 'time' if 'time' in data.dims else data.dims[0]
         times = ds[time_coord].values
         
-        # 加载或计算统计量
-        stats = None
-        if normalize and stat_dir:
-            stats = load_existing_stats(stat_dir, var_name)
-        
         # 处理每个时间步
         for t_idx, t in enumerate(tqdm(times, desc=f"  处理时间步")):
-            # 解析时间 - 正确处理cftime对象
             try:
                 year, month = cftime_to_datetime(t)
             except Exception as e: 
                 print(f"  时间解析警告: {e}, 尝试其他方法")
-                # 尝试从索引推断
                 start_date = file_info['start_date']
                 start_year = int(start_date[:4])
                 start_month = int(start_date[4:6])
@@ -365,10 +400,8 @@ def process_nc_file_with_cdo(nc_file, output_base_dir, grid_file, zaxis_file,
                 year = start_year + total_months // 12
                 month = total_months % 12 + 1
             
-            # 输出文件名
             output_file = os.path.join(output_dir, f"{year}_{month}.npy")
             
-            # 如果文件已存在，跳过
             if os.path.exists(output_file):
                 continue
             
@@ -377,14 +410,12 @@ def process_nc_file_with_cdo(nc_file, output_base_dir, grid_file, zaxis_file,
             
             # 处理数据维度
             if is_3d and len(time_data.shape) == 2:
-                # 如果是3D变量但只有2D，可能需要扩展
                 time_data = time_data[np.newaxis, :, :]
             
-            # 标准化数据
+            # 标准化数据（传入var_name用于调试）
             if normalize and stats is not None:
-                time_data = normalize_data(time_data, month, stats)
+                time_data = normalize_data(time_data, month, stats, var_name)
             else:
-                # 只处理NaN
                 time_data = np.nan_to_num(time_data, nan=0.0, posinf=0.0, neginf=0.0)
                 time_data = time_data.astype(np.float32)
             
@@ -392,10 +423,9 @@ def process_nc_file_with_cdo(nc_file, output_base_dir, grid_file, zaxis_file,
             np.save(output_file, time_data)
         
         ds.close()
-        print(f"  完成!  输出目录: {output_dir}")
+        print(f"  完成! 输出目录: {output_dir}")
         
     finally:
-        # 清理临时目录（仅清理插值中间文件）
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -477,6 +507,9 @@ def process_nc_file_scipy(nc_file, output_base_dir, stat_dir=None, normalize=Tru
     stats = None
     if normalize and stat_dir:
         stats = load_existing_stats(stat_dir, var_name)
+        if stats is None:
+            print(f"  无法加载统计量，跳过标准化")
+            normalize = False
     
     # 处理每个时间步
     for t_idx, t in enumerate(tqdm(times, desc=f"  处理时间步")):
@@ -505,9 +538,9 @@ def process_nc_file_scipy(nc_file, output_base_dir, stat_dir=None, normalize=Tru
                 time_data = time_data[0]
             result = regrid_2d_scipy(time_data, src_lats, src_lons, target_lats, target_lons)
         
-        # 标准化
+        # 标准化数据（传入var_name）
         if normalize and stats is not None: 
-            result = normalize_data(result, month, stats)
+            result = normalize_data(result, month, stats, var_name)
         else:
             result = np.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0)
             result = result.astype(np.float32)
