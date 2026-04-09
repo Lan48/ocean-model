@@ -425,6 +425,76 @@ class ORCADLPredictor:
             torch.from_numpy(atmo_vars).float().to(self.device)
         )
     
+    def reformat_batch(
+        self,
+        ocean_data: Dict[str, np.ndarray],
+        atmo_data: Dict[str, np.ndarray],
+        ocean_var_names: List[str],
+        atmo_var_names: List[str]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        只改变数据格式但不处理数据内容的批量重构函数
+        
+        Args:
+            ocean_data: 海洋变量字典 {变量名: 数据数组}
+            atmo_data: 大气变量字典 {变量名: 数据数组}
+            ocean_var_names: 海洋变量名称列表，决定变量顺序
+            atmo_var_names: 大气变量名称列表，决定变量顺序
+            
+        Returns:
+            ocean_tensor, atmo_tensor: 仅格式改变后的张量，数据内容保持不变
+        """
+        # 重构海洋变量格式
+        ocean_vars_list = []
+        for var_name in ocean_var_names:
+            data = ocean_data[var_name]
+            
+            # 只调整维度，不改变数值
+            if len(data.shape) == 2:  # (H, W) -> (1, H, W)
+                data = data[np.newaxis, ...]
+            elif len(data.shape) == 3:  # 已经是 (C, H, W) 或 (T, H, W)
+                pass  # 保持原样
+            else:
+                raise ValueError(f"海洋变量 {var_name} 的维度 {data.shape} 不支持")
+            
+            ocean_vars_list.append(data)
+        
+        # 沿通道维度拼接，不进行数值处理
+        ocean_vars = np.concatenate(ocean_vars_list, axis=0)
+        # 将 NaN 替换为 0（与 normalize_batch 的处理保持一致）
+        ocean_vars = np.nan_to_num(ocean_vars)
+        
+        # 重构大气变量格式
+        atmo_vars_list = []
+        for var_name in atmo_var_names:
+            data = atmo_data[var_name]
+            
+            # 只调整维度，不改变数值
+            if len(data.shape) == 2:  # (H, W) -> (1, H, W)
+                data = data[np.newaxis, ...]
+            elif len(data.shape) == 3:  # 已经是 (C, H, W) 或 (T, H, W)
+                pass  # 保持原样
+            else:
+                raise ValueError(f"大气变量 {var_name} 的维度 {data.shape} 不支持")
+            
+            atmo_vars_list.append(data)
+        
+        # 沿通道维度拼接，不进行数值处理
+        atmo_vars = np.concatenate(atmo_vars_list, axis=0)
+        # 将 NaN 替换为 0
+        atmo_vars = np.nan_to_num(atmo_vars)
+        
+        # 添加batch维度
+        if len(ocean_vars.shape) == 3: 
+            ocean_vars = ocean_vars[np.newaxis, ...]  # (C, H, W) -> (1, C, H, W)
+            atmo_vars = atmo_vars[np.newaxis, ...]     # (C, H, W) -> (1, C, H, W)
+        
+        # 转换为张量，不改变数值，并放到预测器设备上
+        return (
+            torch.from_numpy(ocean_vars).float().to(self.device),
+            torch.from_numpy(atmo_vars).float().to(self.device)
+        )
+
     def denormalize_output(
         self,
         predictions: np.ndarray,
@@ -444,9 +514,9 @@ class ORCADLPredictor:
         Returns: 
             Dict:  各变量反标准化后的数据
         """
+        print("Denormalizing output with shape:", predictions.shape)
         ndim = len(predictions.shape)
         results = {}
-        
         # 判断输出模式
         if ndim == 3:
             # (C, H, W) - single step, single sample
@@ -499,9 +569,10 @@ def predict_ocean_state(
     atmo_data: Dict[str, np.ndarray],
     start_month: int,
     predict_steps: int = 6,
-    denormalize: bool = True,
+    denormalize: bool = False,
     use_model_naming:  bool = True,
-    batch_mode: bool = False
+    batch_mode: bool = False,
+    normalized: bool = False
 ) -> OceanPredictionResult:
     """
     读取过去海洋状态数据，使用ORCA-DL模型预测未来海洋状态
@@ -528,10 +599,25 @@ def predict_ocean_state(
     Returns:
         OceanPredictionResult: 包含预测结果的数据类
     """
+    # 检查当前数据的键名
+    print("ocean_data keys:", list(ocean_data.keys()))
+    print("atmo_data keys:", list(atmo_data.keys()))
+
+    # 对比期望的键名
+    print("期望的GODAS海洋变量:", predictor.STAT_OCEAN_VARIABLES)
+    print("期望的GODAS大气变量:", predictor.STAT_ATMO_VARIABLES)
     # 1.标准化并准备输入
-    ocean_vars, atmo_vars = predictor.normalize_batch(
-        ocean_data, atmo_data, start_month, use_model_naming
-    )
+    if normalized == False:
+        ocean_vars, atmo_vars = predictor.normalize_batch(
+            ocean_data, atmo_data, start_month, use_model_naming
+        )
+    else:
+        # 当输入已标准化/只需重排格式时，按照 use_model_naming 选择变量顺序
+        ocean_var_names = predictor.MODEL_OCEAN_VARIABLES if use_model_naming else predictor.STAT_OCEAN_VARIABLES
+        atmo_var_names = predictor.MODEL_ATMO_VARIABLES if use_model_naming else predictor.STAT_ATMO_VARIABLES
+        ocean_vars, atmo_vars = predictor.reformat_batch(
+            ocean_data, atmo_data, ocean_var_names, atmo_var_names
+        )
     
     # 2.模型推理
     with torch.no_grad():

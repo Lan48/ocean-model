@@ -1,0 +1,42 @@
+{
+  "best_metric": 1.479465365409851,
+  "best_model_checkpoint": "/mnt/data/zhu.yishun/ORCA-DL-main/double_output2e-4/checkpoint-100",
+  "epoch": 0.08658008658008658,
+  "global_step": 100,
+  "is_hyper_param_search": false,
+  "is_local_process_zero": true,
+  "is_world_process_zero": true,
+  "log_history": [
+    {
+      "epoch": 0.03,
+      "learning_rate": 1.038961038961039e-06,
+      "loss": 2.7612,
+      "step": 30
+    },
+    {
+      "epoch": 0.05,
+      "learning_rate": 6.233766233766234e-06,
+      "loss": 2.7239,
+      "step": 60
+    },
+    {
+      "epoch": 0.08,
+      "learning_rate": 1.1428571428571429e-05,
+      "loss": 2.7506,
+      "step": 90
+    },
+    {
+      "epoch": 0.09,
+      "eval_loss": 1.479465365409851,
+      "eval_runtime": 51.4819,
+      "eval_samples_per_second": 44.287,
+      "eval_steps_per_second": 1.399,
+      "step": 100
+    }
+  ],
+  "max_steps": 11550,
+  "num_train_epochs": 10,
+  "total_flos": 6.305727717622101e+19,
+  "trial_name": null,
+  "trial_params": null
+}

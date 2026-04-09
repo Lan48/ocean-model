@@ -6,8 +6,8 @@ CMIP6 NetCDF to ORCA-DL NPY Converter
 
 使用方法:  
     python /mnt/data/zhu.yishun/ORCA-DL-main/dataset/data_preprocess.py \
-    --input_dir /mnt/data/zhu.yishun/ssp245_Data \
-    --output_dir /mnt/data/zhu.yishun/ORCA-DL-main/data/2015- \
+    --input_dir /mnt/data/zhu.yishun/2015- \
+    --output_dir /mnt/data/zhu.yishun/ORCA-DL-main/data/train_data \
     --stat_dir /mnt/data/zhu.yishun/ORCA-DL-main/stat \
     --grid_file /mnt/data/zhu.yishun/ORCA-DL-main/grid \
     --zaxis_file /mnt/data/zhu.yishun/ORCA-DL-main/zaxis.txt
@@ -34,10 +34,25 @@ import subprocess
 import tempfile
 import shutil
 import numpy as np
-import xarray as xr
+import h5py
 from glob import glob
 from tqdm import tqdm
-import cftime
+from collections import defaultdict
+
+try:
+    from netCDF4 import Dataset as NetCDF4Dataset
+except ImportError:
+    NetCDF4Dataset = None
+
+try:
+    import xarray as xr
+except ImportError:
+    xr = None
+
+try:
+    import cftime
+except ImportError:
+    cftime = None
 
 # 目标深度层 (单位: 米) - 与ORCA-DL一致
 TARGET_LEVELS = [10, 15, 30, 50, 75, 100, 125, 150, 200, 250, 300, 400, 500, 600, 800, 1000]
@@ -53,6 +68,14 @@ LON_INC = 1.0      # 经度间隔
 # 变量分类
 MULTI_LEVEL_VARS = ['thetao', 'so', 'uo', 'vo']  # 3D变量
 SINGLE_LEVEL_VARS = ['zos', 'tos', 'tauu', 'tauv']  # 2D变量
+
+
+def require_xarray():
+    """在需要旧流程时检查xarray依赖。"""
+    if xr is None:
+        raise ImportError("当前环境未安装 xarray，无法执行 CMIP6 插值流程；processed_new1 模式不受影响")
+    if cftime is None:
+        raise ImportError("当前环境未安装 cftime，无法执行 CMIP6 插值流程；processed_new1 模式不受影响")
 
 
 def check_cdo_available():
@@ -341,15 +364,17 @@ def load_existing_stats(stat_dir, var_name):
 def process_nc_file_with_cdo(nc_file, output_base_dir, grid_file, zaxis_file, 
                               stat_dir=None, compute_stats=False, normalize=True):
     """
-    修改后的处理函数，使用新的统计量加载方法
+    修改后的处理函数，使用模型名和实验名组合作为子目录名称
     """
+    require_xarray()
     # 解析文件名
     file_info = parse_filename(nc_file)
     var_name = file_info['var_name']
     model_name = file_info['model_name']
+    experiment = file_info['experiment']  # 新增：获取实验名
     
     print(f"\n处理文件: {os.path.basename(nc_file)}")
-    print(f"  变量: {var_name}, 模型: {model_name}")
+    print(f"  变量: {var_name}, 模型: {model_name}, 实验: {experiment}")
     
     is_3d = var_name in MULTI_LEVEL_VARS
     
@@ -367,8 +392,9 @@ def process_nc_file_with_cdo(nc_file, output_base_dir, grid_file, zaxis_file,
             process_nc_file_scipy(nc_file, output_base_dir, stat_dir, normalize)
             return
         
-        # 创建输出目录
-        output_dir = os.path.join(output_base_dir, model_name, var_name)
+        # 创建输出目录 - 修改为使用模型名和实验名的组合
+        model_exp_name = f"{model_name}_{experiment}"  # 组合名称
+        output_dir = os.path.join(output_base_dir, model_exp_name, var_name)
         os.makedirs(output_dir, exist_ok=True)
         
         # 加载统计量（在循环外加载一次）
@@ -431,21 +457,24 @@ def process_nc_file_with_cdo(nc_file, output_base_dir, grid_file, zaxis_file,
 
 def process_nc_file_scipy(nc_file, output_base_dir, stat_dir=None, normalize=True):
     """
-    使用scipy处理单个NetCDF文件 (CDO不可用时的备选方案)
+    使用scipy处理单个NetCDF文件 - 同样修改目录结构
     """
+    require_xarray()
     from scipy.interpolate import RegularGridInterpolator, interp1d
     
     # 解析文件名
     file_info = parse_filename(nc_file)
     var_name = file_info['var_name']
     model_name = file_info['model_name']
+    experiment = file_info['experiment']  # 新增：获取实验名
     
     # 创建目标网格
     target_lats = np.arange(LAT_FIRST, LAT_FIRST + TARGET_LAT * LAT_INC, LAT_INC)
     target_lons = np.arange(LON_FIRST, LON_FIRST + TARGET_LON * LON_INC, LON_INC)
     
-    # 创建输出目录
-    output_dir = os.path.join(output_base_dir, model_name, var_name)
+    # 创建输出目录 - 修改为使用模型名和实验名的组合
+    model_exp_name = f"{model_name}_{experiment}"  # 组合名称
+    output_dir = os.path.join(output_base_dir, model_exp_name, var_name)
     os.makedirs(output_dir, exist_ok=True)
     
     # 打开数据集 - 使用use_cftime处理非标准日历
@@ -550,7 +579,6 @@ def process_nc_file_scipy(nc_file, output_base_dir, stat_dir=None, normalize=Tru
     ds.close()
     print(f"  完成! 输出目录: {output_dir}")
 
-
 def regrid_2d_scipy(data, src_lats, src_lons, target_lats, target_lons):
     """使用scipy进行2D插值"""
     from scipy.interpolate import RegularGridInterpolator
@@ -632,9 +660,361 @@ def regrid_3d_scipy(data, src_lats, src_lons, src_depths, target_lats, target_lo
     return result.astype(np.float32)
 
 
+def parse_processed_new1_filename(file_path):
+    """
+    解析 processed_new1 文件名中的年月信息。
+
+    Args:
+        file_path: 文件路径，格式为 <year>_<month>.nc
+
+    Returns:
+        tuple: (year, month)
+    """
+    basename = os.path.basename(file_path)
+    match = re.match(r'(\d+)_(\d+)\.nc$', basename)
+    if not match:
+        raise ValueError(f"无法解析 processed_new1 文件名: {basename}")
+
+    year = int(match.group(1))
+    month = int(match.group(2))
+    if not 1 <= month <= 12:
+        raise ValueError(f"月份超出范围: {basename}")
+
+    return year, month
+
+
+def collect_processed_new1_files(input_root, datasets=None, attrs=None):
+    """
+    扫描 processed_new1 目录，按属性聚合所有 nc 文件。
+
+    Args:
+        input_root: processed_new1 根目录
+        datasets: 仅处理指定数据集
+        attrs: 仅处理指定属性
+
+    Returns:
+        dict: {attr: [(dataset_name, month, file_path), ...]}
+    """
+    if not os.path.isdir(input_root):
+        raise FileNotFoundError(f"processed_new1 输入目录不存在: {input_root}")
+
+    dataset_filter = set(datasets) if datasets else None
+    attr_filter = set(attrs) if attrs else None
+    collected = {}
+
+    for dataset_name in sorted(os.listdir(input_root)):
+        dataset_dir = os.path.join(input_root, dataset_name)
+        if not os.path.isdir(dataset_dir):
+            continue
+        if dataset_filter and dataset_name not in dataset_filter:
+            continue
+
+        for attr_name in sorted(os.listdir(dataset_dir)):
+            attr_dir = os.path.join(dataset_dir, attr_name)
+            if not os.path.isdir(attr_dir):
+                continue
+            if attr_filter and attr_name not in attr_filter:
+                continue
+
+            file_infos = collected.setdefault(attr_name, [])
+            for entry in sorted(os.listdir(attr_dir)):
+                if not entry.endswith('.nc'):
+                    continue
+                file_path = os.path.join(attr_dir, entry)
+                _, month = parse_processed_new1_filename(file_path)
+                file_infos.append((dataset_name, month, file_path))
+
+    return {attr: infos for attr, infos in collected.items() if infos}
+
+
+def read_processed_new1_nc(file_path, attr_name):
+    """
+    读取 processed_new1 中的 nc 文件主变量，并去掉前导时间维。
+
+    Args:
+        file_path: nc 文件路径
+        attr_name: 属性名，同时也是数据集名
+
+    Returns:
+        np.ndarray: 2D 或 3D 数组
+    """
+    data = None
+    read_errors = []
+
+    if NetCDF4Dataset is not None:
+        try:
+            with NetCDF4Dataset(file_path, 'r') as handle:
+                if attr_name not in handle.variables:
+                    raise KeyError(f"{file_path} 中不存在变量 {attr_name}")
+                data = np.asarray(handle.variables[attr_name][...], dtype=np.float64)
+        except Exception as exc:
+            read_errors.append(f"netCDF4: {exc}")
+
+    if data is None:
+        try:
+            with h5py.File(file_path, 'r') as handle:
+                if attr_name not in handle:
+                    raise KeyError(f"{file_path} 中不存在变量 {attr_name}")
+                data = np.asarray(handle[attr_name][...], dtype=np.float64)
+        except Exception as exc:
+            read_errors.append(f"h5py: {exc}")
+
+    if data is None:
+        raise OSError(f"{file_path} 读取失败; " + " | ".join(read_errors))
+
+    if data.ndim >= 3 and data.shape[0] == 1:
+        data = data[0]
+
+    if data.ndim not in (2, 3):
+        raise ValueError(f"{file_path} 读取后维度异常: {data.shape}")
+
+    return data
+
+
+def summarize_processed_new1_skips(attr_name, skipped, stage, max_examples=10):
+    """
+    打印 processed_new1 跳过文件汇总，避免单个坏样本中断整批流程。
+    """
+    if not skipped:
+        return
+
+    print(f"[{stage}] {attr_name} 跳过 {len(skipped)} 个异常文件")
+    for file_path, reason in skipped[:max_examples]:
+        print(f"  - {file_path}: {reason}")
+    if len(skipped) > max_examples:
+        print(f"  ... 其余 {len(skipped) - max_examples} 个异常文件已省略")
+
+
+def compute_monthly_stats_from_nc(file_infos):
+    """
+    使用流式累加方式计算某个属性的月度 mean/std。
+
+    Args:
+        file_infos: [(dataset_name, month, file_path), ...]
+
+    Returns:
+        dict: {'mean': array, 'std': array}
+    """
+    if not file_infos:
+        raise ValueError("file_infos 不能为空")
+
+    first_file = file_infos[0][2]
+    attr_name = os.path.basename(os.path.dirname(first_file))
+    skipped = []
+    data_shape = None
+    sums = None
+    sum_sqs = None
+    counts = None
+
+    for _, month, file_path in tqdm(file_infos, desc=f"统计 {attr_name}", unit='file'):
+        try:
+            data = read_processed_new1_nc(file_path, attr_name)
+        except (OSError, KeyError, ValueError) as exc:
+            skipped.append((file_path, str(exc)))
+            continue
+
+        if data_shape is None:
+            data_shape = data.shape
+            sums = np.zeros((12,) + data_shape, dtype=np.float64)
+            sum_sqs = np.zeros((12,) + data_shape, dtype=np.float64)
+            counts = np.zeros((12,) + data_shape, dtype=np.int64)
+        elif data.shape != data_shape:
+            skipped.append((file_path, f"形状不一致: {data.shape} != {data_shape}"))
+            continue
+
+        month_idx = month - 1
+        valid_mask = np.isfinite(data)
+        month_sum = sums[month_idx]
+        month_sum_sq = sum_sqs[month_idx]
+        month_count = counts[month_idx]
+
+        month_sum[valid_mask] += data[valid_mask]
+        month_sum_sq[valid_mask] += np.square(data[valid_mask], dtype=np.float64)
+        month_count[valid_mask] += 1
+
+    if data_shape is None:
+        raise ValueError(f"{attr_name} 没有可用于统计的有效文件")
+
+    means = np.zeros_like(sums, dtype=np.float64)
+    stds = np.ones_like(sums, dtype=np.float64)
+
+    valid_counts = counts > 0
+    np.divide(sums, counts, out=means, where=valid_counts)
+
+    variances = np.zeros_like(sums, dtype=np.float64)
+    np.divide(sum_sqs, counts, out=variances, where=valid_counts)
+    variances = np.maximum(variances - np.square(means), 0.0)
+
+    stds[valid_counts] = np.sqrt(variances[valid_counts])
+    means[~valid_counts] = 0.0
+    stds[~valid_counts] = 1.0
+    stds[stds == 0] = 1.0
+
+    return {
+        'mean': means.astype(np.float32),
+        'std': stds.astype(np.float32)
+    }, skipped
+
+
+def save_monthly_stats(stat_root, attr_name, stats):
+    """
+    保存月度统计量到 stat/mean 与 stat/std。
+    """
+    mean_dir = os.path.join(stat_root, 'mean')
+    std_dir = os.path.join(stat_root, 'std')
+    os.makedirs(mean_dir, exist_ok=True)
+    os.makedirs(std_dir, exist_ok=True)
+
+    np.save(os.path.join(mean_dir, f'{attr_name}.npy'), stats['mean'])
+    np.save(os.path.join(std_dir, f'{attr_name}.npy'), stats['std'])
+
+
+def load_processed_new1_stats(stat_root, attr_name):
+    """
+    加载 processed_new1 属性对应的月度统计量。
+    """
+    mean_path = os.path.join(stat_root, 'mean', f'{attr_name}.npy')
+    std_path = os.path.join(stat_root, 'std', f'{attr_name}.npy')
+    if not os.path.exists(mean_path) or not os.path.exists(std_path):
+        raise FileNotFoundError(f"缺少统计量文件: {mean_path} 或 {std_path}")
+
+    return {
+        'mean': np.load(mean_path),
+        'std': np.load(std_path)
+    }
+
+
+def normalize_processed_new1_files(file_infos, stats, normalized_root, overwrite=False):
+    """
+    按月份将 processed_new1 nc 数据归一化并保存为 npy。
+
+    Args:
+        file_infos: [(dataset_name, month, file_path), ...]
+        stats: {'mean': array, 'std': array}
+        normalized_root: 归一化数据输出目录
+        overwrite: 是否覆盖已有输出
+    """
+    if not file_infos:
+        return
+
+    first_file = file_infos[0][2]
+    attr_name = os.path.basename(os.path.dirname(first_file))
+    skipped = []
+
+    for dataset_name, month, file_path in tqdm(file_infos, desc=f"归一化 {attr_name}", unit='file'):
+        attr_dir = os.path.join(normalized_root, dataset_name, attr_name)
+        os.makedirs(attr_dir, exist_ok=True)
+
+        output_name = os.path.splitext(os.path.basename(file_path))[0] + '.npy'
+        output_path = os.path.join(attr_dir, output_name)
+        if os.path.exists(output_path) and not overwrite:
+            continue
+
+        try:
+            data = read_processed_new1_nc(file_path, attr_name)
+        except (OSError, KeyError, ValueError) as exc:
+            skipped.append((file_path, str(exc)))
+            continue
+
+        mean = stats['mean'][month - 1]
+        std = stats['std'][month - 1]
+        if data.shape != mean.shape or data.shape != std.shape:
+            skipped.append(
+                (file_path, f"形状与统计量不匹配: data={data.shape}, mean={mean.shape}, std={std.shape}")
+            )
+            continue
+
+        normalized = (data - mean) / std
+        normalized = np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+        np.save(output_path, normalized)
+
+    return skipped
+
+
+def run_processed_new1_pipeline(args):
+    """
+    执行 processed_new1 月度统计与归一化流程。
+    """
+    input_root = args.processed_new1_root
+    stat_root = args.stat_root
+    normalized_root = args.normalized_root
+
+    if not input_root:
+        raise ValueError("processed_new1 模式必须提供 --processed_new1_root")
+    if not stat_root:
+        raise ValueError("processed_new1 模式必须提供 --stat_root")
+    if args.phase in ('normalize', 'all') and not normalized_root:
+        raise ValueError("phase 为 normalize/all 时必须提供 --normalized_root")
+
+    file_map = collect_processed_new1_files(
+        input_root=input_root,
+        datasets=args.datasets,
+        attrs=args.attrs
+    )
+    if not file_map:
+        print("未找到任何符合条件的 processed_new1 nc 文件")
+        return
+
+    print(f"找到 {sum(len(v) for v in file_map.values())} 个 processed_new1 文件")
+    print(f"涉及 {len(file_map)} 个属性: {', '.join(sorted(file_map))}")
+
+    computed_stats = {}
+    skipped_summary = defaultdict(lambda: {'stats': 0, 'normalize': 0})
+    if args.phase in ('stats', 'all'):
+        for attr_name, file_infos in sorted(file_map.items()):
+            mean_path = os.path.join(stat_root, 'mean', f'{attr_name}.npy')
+            std_path = os.path.join(stat_root, 'std', f'{attr_name}.npy')
+            
+            # 检查是否应该复用已有的统计量
+            stats_exist = os.path.exists(mean_path) and os.path.exists(std_path)
+            should_skip = stats_exist and not args.recompute_stats and not args.overwrite
+            
+            if should_skip:
+                print(f"复用已有统计量: {attr_name}")
+                continue
+            
+            if stats_exist and (args.recompute_stats or args.overwrite):
+                if args.recompute_stats:
+                    print(f"重新计算统计量: {attr_name} (--recompute-stats 指定)")
+                else:
+                    print(f"重新计算统计量: {attr_name} (--overwrite 指定)")
+
+            stats, skipped = compute_monthly_stats_from_nc(file_infos)
+            save_monthly_stats(stat_root, attr_name, stats)
+            computed_stats[attr_name] = stats
+            skipped_summary[attr_name]['stats'] = len(skipped)
+            summarize_processed_new1_skips(attr_name, skipped, stage='stats')
+            print(f"已保存统计量: {attr_name}")
+
+    if args.phase in ('normalize', 'all'):
+        for attr_name, file_infos in sorted(file_map.items()):
+            stats = computed_stats.get(attr_name)
+            if stats is None:
+                stats = load_processed_new1_stats(stat_root, attr_name)
+
+            skipped = normalize_processed_new1_files(
+                file_infos=file_infos,
+                stats=stats,
+                normalized_root=normalized_root,
+                overwrite=args.overwrite
+            )
+            skipped_summary[attr_name]['normalize'] = len(skipped)
+            summarize_processed_new1_skips(attr_name, skipped, stage='normalize')
+            print(f"已完成归一化输出: {attr_name}")
+
+    if skipped_summary:
+        print("\nprocessed_new1 异常文件汇总:")
+        for attr_name in sorted(skipped_summary):
+            stats_skipped = skipped_summary[attr_name]['stats']
+            normalize_skipped = skipped_summary[attr_name]['normalize']
+            if stats_skipped == 0 and normalize_skipped == 0:
+                continue
+            print(f"  - {attr_name}: stats 跳过 {stats_skipped} 个, normalize 跳过 {normalize_skipped} 个")
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description='将CMIP6 NetCDF数据转换为ORCA-DL训练格式 (使用本地grid和zaxis文件)',
+        description='ORCA-DL 数据预处理脚本，支持 CMIP6 插值流程与 processed_new1 月度统计/归一化流程',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:  
@@ -651,17 +1031,39 @@ def main():
     ├── so/
     │   ├── 1905_1.npy
     │   └── ... 
-    └── ... 
+    └── ...
+
+processed_new1 月度统计与归一化:
+    python data_preprocess.py \
+        --processed_new1_root /mnt/data/zhu.yishun/ORCA-DL-main/data/processed_new1 \
+        --stat_root /mnt/data/zhu.yishun/ORCA-DL-main/stat \
+        --normalized_root /mnt/data/zhu.yishun/ORCA-DL-main/data/processed_new1_normalized \
+        --phase all
+
+直接复用已有的统计量（如果存在）进行归一化:
+    python data_preprocess.py \
+        --processed_new1_root /mnt/data/zhu.yishun/ORCA-DL-main/data/processed_new1 \
+        --stat_root /mnt/data/zhu.yishun/ORCA-DL-main/stat \
+        --normalized_root /mnt/data/zhu.yishun/ORCA-DL-main/data/processed_new1_normalized \
+        --phase normalize
+
+强制重新计算所有统计量，不使用已有结果:
+    python data_preprocess.py \
+        --processed_new1_root /mnt/data/zhu.yishun/ORCA-DL-main/data/processed_new1 \
+        --stat_root /mnt/data/zhu.yishun/ORCA-DL-main/stat \
+        --normalized_root /mnt/data/zhu.yishun/ORCA-DL-main/data/processed_new1_normalized \
+        --phase all \
+        --recompute-stats
         """
     )
     
-    parser.add_argument('--input_dir', type=str, required=True,
+    parser.add_argument('--input_dir', type=str, default=None,
                        help='CMIP6 NetCDF数据输入目录')
-    parser.add_argument('--output_dir', type=str, required=True,
+    parser.add_argument('--output_dir', type=str, default=None,
                        help='转换后数据输出目录')
-    parser.add_argument('--grid_file', type=str, required=True,
+    parser.add_argument('--grid_file', type=str, default=None,
                        help='本地已有CDO grid配置文件路径 (如./grid)')
-    parser.add_argument('--zaxis_file', type=str, required=True,
+    parser.add_argument('--zaxis_file', type=str, default=None,
                        help='本地已有CDO zaxis配置文件路径 (如./zaxis.txt)')
     parser.add_argument('--stat_dir', type=str, default=None,
                        help='统计量目录 (用于标准化，如ORCA-DL提供的stat目录)')
@@ -671,50 +1073,89 @@ def main():
                        help='不进行数据标准化 (仅插值)')
     parser.add_argument('--force_scipy', action='store_true',
                        help='强制使用scipy插值 (不使用CDO，忽略grid和zaxis文件)')
+    parser.add_argument('--processed_new1_root', type=str, default=None,
+                       help='processed_new1 输入根目录')
+    parser.add_argument('--stat_root', type=str, default=None,
+                       help='processed_new1 模式下统计量输出目录')
+    parser.add_argument('--normalized_root', type=str, default=None,
+                       help='processed_new1 模式下归一化 npy 输出目录')
+    parser.add_argument('--datasets', type=str, nargs='+', default=None,
+                       help='processed_new1 模式下仅处理指定数据集')
+    parser.add_argument('--attrs', type=str, nargs='+', default=None,
+                       help='processed_new1 模式下仅处理指定属性')
+    parser.add_argument('--phase', type=str, choices=['stats', 'normalize', 'all'], default='all',
+                       help='processed_new1 模式下执行阶段')
+    parser.add_argument('--overwrite', action='store_true',
+                       help='processed_new1 模式下覆盖已有统计量或归一化输出')
+    parser.add_argument('--recompute-stats', action='store_true',
+                       help='重新计算统计量，即使已有统计量文件也会重新计算（不使用已有结果）')
     
     args = parser.parse_args()
-    
+
+    if args.processed_new1_root:
+        print("运行模式: processed_new1 月度统计与归一化")
+        print(f"输入目录: {args.processed_new1_root}")
+        print(f"统计量目录: {args.stat_root}")
+        if args.normalized_root:
+            print(f"归一化输出目录: {args.normalized_root}")
+        print(f"执行阶段: {args.phase}")
+        print(f"覆盖已有结果: {'是' if args.overwrite else '否'}")
+        print(f"重新计算统计量: {'是' if args.recompute_stats else '否 (如已有则直接复用)'}")
+        if args.datasets:
+            print(f"数据集过滤: {args.datasets}")
+        if args.attrs:
+            print(f"属性过滤: {args.attrs}")
+
+        run_processed_new1_pipeline(args)
+        print("\nprocessed_new1 处理完成!")
+        return
+
+    if not args.input_dir:
+        parser.error("未指定运行模式：请提供 --processed_new1_root，或提供 --input_dir/--output_dir 运行旧的 CMIP6 流程")
+    if not args.output_dir:
+        parser.error("CMIP6 流程必须提供 --output_dir")
+
     # 检查输入目录
     if not os.path.exists(args.input_dir):
         print(f"错误: 输入目录不存在: {args.input_dir}")
         return
-    
+
     # 检查本地grid和zaxis文件（仅当使用CDO时）
     use_cdo = check_cdo_available() and not args.force_scipy
     if use_cdo:
-        if not os.path.exists(args.grid_file):
+        if not args.grid_file or not os.path.exists(args.grid_file):
             print(f"错误: 指定的grid文件不存在: {args.grid_file}")
             return
-        if not os.path.exists(args.zaxis_file):
+        if not args.zaxis_file or not os.path.exists(args.zaxis_file):
             print(f"错误: 指定的zaxis文件不存在: {args.zaxis_file}")
             return
-    
+
     # 创建输出目录
     os.makedirs(args.output_dir, exist_ok=True)
-    
+
     # 显示配置信息
-    if use_cdo: 
+    if use_cdo:
         print("检测到CDO，将使用CDO进行网格插值 (使用本地grid和zaxis文件)")
         print(f"使用本地grid文件: {args.grid_file}")
         print(f"使用本地zaxis文件: {args.zaxis_file}")
     else:
         print("CDO不可用或已禁用，将使用scipy进行插值")
-    
+
     print(f"目标网格: {TARGET_LON} x {TARGET_LAT} (经度 x 纬度)")
     print(f"网格范围: 经度 [{LON_FIRST}, {LON_FIRST + TARGET_LON * LON_INC}), 纬度 [{LAT_FIRST}, {LAT_FIRST + TARGET_LAT * LAT_INC})")
     print(f"目标深度层 ({len(TARGET_LEVELS)}层): {TARGET_LEVELS}")
     print(f"数据标准化: {'否' if args.no_normalize else '是'}")
     if args.stat_dir:
         print(f"统计量目录: {args.stat_dir}")
-    
+
     # 查找所有NetCDF文件
     nc_files = glob(os.path.join(args.input_dir, '*.nc'))
-    
+
     if len(nc_files) == 0:
         nc_files = glob(os.path.join(args.input_dir, '**', '*.nc'), recursive=True)
-    
+
     print(f"\n找到 {len(nc_files)} 个NetCDF文件")
-    
+
     # 过滤变量
     if args.var_filter:
         filtered_files = []
@@ -723,20 +1164,20 @@ def main():
                 info = parse_filename(f)
                 if info['var_name'] in args.var_filter:
                     filtered_files.append(f)
-            except: 
+            except Exception:
                 pass
         nc_files = filtered_files
         print(f"过滤后:  {len(nc_files)} 个文件 (变量: {args.var_filter})")
-    
-    if use_cdo: 
+
+    if use_cdo:
         # 直接使用用户指定的grid和zaxis文件，无需创建临时配置目录
         grid_file = os.path.abspath(args.grid_file)
         zaxis_file = os.path.abspath(args.zaxis_file)
-        
+
         for nc_file in nc_files:
             try:
                 process_nc_file_with_cdo(nc_file, args.output_dir, grid_file, zaxis_file,
-                                         stat_dir=args.stat_dir, 
+                                         stat_dir=args.stat_dir,
                                          normalize=not args.no_normalize)
             except Exception as e:
                 print(f"处理文件失败 {nc_file}:  {e}")
@@ -745,17 +1186,25 @@ def main():
     else:
         for nc_file in nc_files:
             try:
-                process_nc_file_scipy(nc_file, args.output_dir, 
+                process_nc_file_scipy(nc_file, args.output_dir,
                                       stat_dir=args.stat_dir,
                                       normalize=not args.no_normalize)
-            except Exception as e: 
+            except Exception as e:
                 print(f"处理文件失败 {nc_file}: {e}")
                 import traceback
                 traceback.print_exc()
-    
+
     print("\n转换完成!")
     print(f"输出目录: {args.output_dir}")
 
 
 if __name__ == '__main__':
     main()
+'''
+python /mnt/data/zhu.yishun/ORCA-DL-main/dataset/data_preprocess.py \
+  --processed_new1_root /mnt/data/zhu.yishun/ORCA-DL-main/data/processed-val-test1 \
+  --stat_root /mnt/data/zhu.yishun/ORCA-DL-main/stat \
+  --normalized_root /mnt/data/zhu.yishun/ORCA-DL-main/data/valid_test_data \
+  --phase normalize
+
+'''

@@ -1,0 +1,73 @@
+/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/functional.py:504: UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at ../aten/src/ATen/native/TensorShape.cpp:3526.)
+  return _VF.meshgrid(tensors, **kwargs)  # type: ignore[attr-defined]
+/root/miniconda3/envs/orca/lib/python3.10/site-packages/transformers/optimization.py:391: FutureWarning: This implementation of AdamW is deprecated and will be removed in a future version. Use the PyTorch implementation torch.optim.AdamW instead, or set `no_deprecation_warning=True` to disable this warning
+  warnings.warn(
+/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/utils.py:166: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  storage = elem.storage()._new_shared(numel, device=elem.device)
+/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/utils.py:166: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  storage = elem.storage()._new_shared(numel, device=elem.device)
+/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/utils.py:166: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  storage = elem.storage()._new_shared(numel, device=elem.device)
+/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/utils.py:166: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  storage = elem.storage()._new_shared(numel, device=elem.device)
+/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/utils.py:166: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  storage = elem.storage()._new_shared(numel, device=elem.device)
+/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/utils.py:166: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  storage = elem.storage()._new_shared(numel, device=elem.device)
+/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/utils.py:166: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  storage = elem.storage()._new_shared(numel, device=elem.device)
+/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/utils.py:166: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  storage = elem.storage()._new_shared(numel, device=elem.device)
+/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/utils.py:166: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  storage = elem.storage()._new_shared(numel, device=elem.device)
+/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/utils.py:166: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  storage = elem.storage()._new_shared(numel, device=elem.device)
+/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/utils.py:166: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  storage = elem.storage()._new_shared(numel, device=elem.device)
+/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/utils.py:166: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  storage = elem.storage()._new_shared(numel, device=elem.device)
+Exception ignored in: <function _MultiProcessingDataLoaderIter.__del__ at 0x7fab1c0cdbd0>
+Traceback (most recent call last):
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 1478, in __del__
+    self._shutdown_workers()
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 1442, in _shutdown_workers
+    w.join(timeout=_utils.MP_STATUS_CHECK_INTERVAL)
+  File "/root/miniconda3/envs/orca/lib/python3.10/multiprocessing/process.py", line 149, in join
+    res = self._popen.wait(timeout)
+  File "/root/miniconda3/envs/orca/lib/python3.10/multiprocessing/popen_fork.py", line 40, in wait
+    if not wait([self.sentinel], timeout):
+  File "/root/miniconda3/envs/orca/lib/python3.10/multiprocessing/connection.py", line 931, in wait
+    ready = selector.select(timeout)
+  File "/root/miniconda3/envs/orca/lib/python3.10/selectors.py", line 416, in select
+    fd_event_list = self._selector.poll(timeout)
+KeyboardInterrupt: 
+Traceback (most recent call last):
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/train.py", line 245, in <module>
+    main()
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 346, in wrapper
+    return f(*args, **kwargs)
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/train.py", line 219, in main
+    train_result = trainer.train(resume_from_checkpoint=checkpoint)
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/trainer.py", line 433, in train
+    return inner_training_loop(
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/trainer.py", line 779, in _inner_training_loop
+    self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval)
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/trainer.py", line 346, in _maybe_log_save_evaluate
+    metrics = self.evaluate(ignore_keys=ignore_keys_for_eval)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/transformers/trainer.py", line 2993, in evaluate
+    output = eval_loop(
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/trainer.py", line 985, in evaluation_loop
+    for step, inputs in enumerate(dataloader):
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 630, in __next__
+    data = self._next_data()
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 1328, in _next_data
+    idx, data = self._get_data()
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 1284, in _get_data
+    success, data = self._try_get_data()
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 1132, in _try_get_data
+    data = self._data_queue.get(timeout=timeout)
+  File "/root/miniconda3/envs/orca/lib/python3.10/queue.py", line 180, in get
+    self.not_empty.wait(remaining)
+  File "/root/miniconda3/envs/orca/lib/python3.10/threading.py", line 324, in wait
+    gotit = waiter.acquire(True, timeout)
+KeyboardInterrupt

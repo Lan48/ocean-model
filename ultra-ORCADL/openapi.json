@@ -1,0 +1,222 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "ORCA-DL Ocean Prediction Visualization API",
+    "version": "1.0.0",
+    "description": "海洋预测可视化API服务，提供季节平均态、ENSO预测、海洋热浪、年代际预测四类功能"
+  },
+  "servers": [
+    {
+      "url": "http://172.17.0.1:8906"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "健康检查",
+        "responses": {
+          "200": {
+            "description": "服务状态",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string" },
+                    "model_loaded": { "type": "boolean" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/seasonal_mean_visual": {
+      "post": {
+        "operationId": "seasonal_mean_visual",
+        "tags": ["seasonal"],
+        "summary": "季节平均态模拟可视化",
+        "description": "根据指定季节和经纬度范围，返回季节平均态的空间分布可视化结果",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SeasonalMeanRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "成功", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SeasonalMeanResponse" } } } },
+          "400": { "description": "参数错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "500": { "description": "服务器内部错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      }
+    },
+    "/enso_forecast_visual": {
+      "post": {
+        "operationId": "enso_forecast_visual",
+        "tags": ["enso"],
+        "summary": "ENSO季节性预测可视化",
+        "description": "预测Nino3.4指数的时间序列变化，返回可视化结果。基线按预测优先策略构建：使用模型预测值构建基线。接口不接收上传的 ocean_data/atmo_data（不接受用户自定义的 nino34_clim_mean_values）。",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ENSOForecastRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "成功", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ENSOForecastResponse" } } } },
+          "400": { "description": "参数错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "500": { "description": "服务器内部错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      }
+    },
+    "/marine_heatwave_visual": {
+      "post": {
+        "operationId": "marine_heatwave_visual",
+        "tags": ["heatwave"],
+        "summary": "海洋热浪可视化",
+        "description": "检测指定时段内的海洋热浪事件，返回热浪天数的空间分布可视化",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MarineHeatwaveRequest" } } } },
+        "responses": {
+          "200": { "description": "成功", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MarineHeatwaveResponse" } } } },
+          "400": { "description": "参数错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "500": { "description": "服务器内部错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      }
+    },
+    "/decadal_prediction_visual": {
+      "post": {
+        "operationId": "decadal_prediction_visual",
+        "tags": ["decadal"],
+        "summary": "年代际预测可视化",
+        "description": "年代际（多年）预测的演化图，返回年度均值时间序列与可视化图",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DecadalPredictionRequest" } } } },
+        "responses": {
+          "200": { "description": "成功", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DecadalPredictionResponse" } } } },
+          "400": { "description": "参数错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "500": { "description": "服务器内部错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "SeasonalMeanRequest": {
+        "type": "object",
+        "required": ["lat_min","lat_max","lon_min","lon_max","var_name","predict_steps"],
+        "properties": {
+          "lat_min": { "type": "number", "minimum": -63.5, "maximum": 63.5 },
+          "lat_max": { "type": "number", "minimum": -63.5, "maximum": 63.5 },
+          "lon_min": { "type": "number", "minimum": 0.5, "maximum": 359.5 },
+          "lon_max": { "type": "number", "minimum": 0.5, "maximum": 359.5 },
+          "var_name": { "type": "string", "enum": ["so","thetao","tos","uo","vo","zos","hfds","mlotst","rsntds","sob","sos","tob","wfo","wo"] },
+          "season": { "type": "string", "enum": ["DJF","MAM","JJA","SON"], "description": "可选：仅在 aggregation_mode='season' 时指定季节" },
+          "predict_steps": { "type": "integer", "minimum": 1 },
+          "start_month": { "type": "integer", "minimum": 1, "maximum": 12 },
+          "aggregation_mode": { "type": "string", "enum": ["season","year","month"], "default": "season", "description": "聚合方式：'season'|'year'|'month'，默认 'season'" },
+          "occurrence_index": { "type": "integer", "minimum": 1, "default": 1, "description": "选择第几个该聚合周期（1表示第一个匹配的季节/年度/月份）" },
+          "month": { "type": "integer", "minimum": 1, "maximum": 12, "description": "仅当 aggregation_mode='month' 时使用，指定要聚合的日历月（1-12）" }
+          ,
+          "depth_index": { "type": "integer", "minimum": 0, "description": "可选：深度层索引（0为表层）；若变量无深度维度则忽略" }
+        }
+      },
+      "SeasonalMeanResponse": {
+        "type": "object",
+        "properties": {
+          "attribute_matrix": { "type": "array", "items": { "type": "array", "items": { "type": "number" } } },
+          "attribute_description": { "type": "string" },
+          "visual_base64": { "type": "string" }
+        },
+        "required": ["attribute_matrix","attribute_description","visual_base64"]
+      },
+      "ENSOForecastRequest": {
+        "type": "object",
+        "required": ["predict_steps","start_month"],
+        "properties": {
+          "predict_steps": { "type": "integer", "minimum": 1 },
+          "start_month": { "type": "integer", "minimum": 1, "maximum": 12 },
+          "start_offset": { "type": "integer", "minimum": 0, "default": 0, "description": "起始偏移（月），相对于 start_month 的月数，>=0" },
+          "end_offset": { "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }], "description": "结束偏移（月），相对于 start_month 的月数，需>= start_offset；若为 null 则默认为 predict_steps-1" }
+        },
+        "description": "注意：不再接受用户自定义的 nino34_clim_mean_values。基线由模型预测优先构建。接口不接收上传的 ocean_data/atmo_data。"
+      },
+      "ENSOForecastResponse": {
+        "type": "object",
+        "properties": {
+          "attribute_matrix": { "type": "array", "items": { "type": "number" }, "description": "Nino3.4指数时间序列" },
+          "attribute_description": { "type": "string" },
+          "visual_base64": { "type": "string" },
+          "event_labels": { "type": "array", "items": { "type": "string", "enum": ["El Nino","La Nina","Neutral"] }, "description": "每步的ENSO事件标签" }
+        },
+        "required": ["attribute_matrix","attribute_description","visual_base64","event_labels"]
+      },
+      "MarineHeatwaveRequest": {
+        "type": "object",
+        "required": ["lat_min","lat_max","lon_min","lon_max","start_month"],
+        "properties": {
+          "lat_min": { "type": "number", "minimum": -63.5, "maximum": 63.5 },
+          "lat_max": { "type": "number", "minimum": -63.5, "maximum": 63.5 },
+          "lon_min": { "type": "number", "minimum": 0.5, "maximum": 359.5 },
+          "lon_max": { "type": "number", "minimum": 0.5, "maximum": 359.5 },
+          "start_month": { "type": "integer", "minimum": 1, "maximum": 12 },
+          "end_month": { "type": "integer", "minimum": 1, "maximum": 12 },
+          "start_offset": { "type": "integer", "minimum": 0, "description": "起始偏移（月），相对于 start_month 的月数，>=0，优先使用 start_offset/end_offset 定义窗口" },
+          "end_offset": { "type": "integer", "minimum": 0, "description": "结束偏移（月），相对于 start_month 的月数，需>= start_offset" },
+          "mh_clim_mean_values": {
+            "oneOf": [
+              { "type": "array", "minItems": 12, "maxItems": 12, "items": { "type": "number" } },
+              { "type": "array", "minItems": 12, "items": { "type": "array", "items": { "type": "number" } } }
+            ],
+            "description": "可选：12个数值或每月网格数组（12组）的气候均值（℃）。若不提供，接口将直接使用模型预测值与服务器端阈值比较。"
+          },
+          "mh_threshold_values": {
+            "oneOf": [
+              { "type": "array", "minItems": 12, "maxItems": 12, "items": { "type": "number" } },
+              { "type": "array", "minItems": 12, "items": { "type": "array", "items": { "type": "number" } } }
+            ],
+            "description": "可选：12个阈值或每月网格阈值（12组）的90百分位数。若不提供，接口将使用服务器端预计算文件 tos_p90_monthly_1993_2023.npy 作为每月90百分位阈值。"
+          }
+        }
+      },
+      "MarineHeatwaveResponse": {
+        "type": "object",
+        "properties": {
+          "attribute_matrix": { "type": "array", "items": { "type": "array", "items": { "type": "number" } }, "description": "热浪总月数矩阵" },
+          "attribute_description": { "type": "string" },
+          "visual_base64": { "type": "string" }
+        },
+        "required": ["attribute_matrix","attribute_description","visual_base64"]
+      },
+      "DecadalPredictionRequest": {
+        "type": "object",
+        "required": ["lat_min","lat_max","lon_min","lon_max","var_name","end_offset"],
+        "properties": {
+          "lat_min": { "type": "number", "minimum": -63.5, "maximum": 63.5 },
+          "lat_max": { "type": "number", "minimum": -63.5, "maximum": 63.5 },
+          "lon_min": { "type": "number", "minimum": 0.5, "maximum": 359.5 },
+          "lon_max": { "type": "number", "minimum": 0.5, "maximum": 359.5 },
+          "var_name": { "type": "string", "enum": ["so","thetao","tos","uo","vo","zos","hfds","mlotst","rsntds","sob","sos","tob","wfo","wo"] },
+          "start_offset": { "type": "integer", "minimum": 0, "default": 0, "description": "起始偏移（月），相对于 start_month 的月数，>=0" },
+          "end_offset": { "type": "integer", "minimum": 0, "description": "结束偏移（月），相对于 start_month 的月数，需>= start_offset；决定模型需要预测到的最远步" },
+          "start_month": { "type": "integer", "minimum": 1, "maximum": 12 },
+          "start_year": { "type": "integer" },
+          "depth_index": { "type": "integer", "minimum": 0, "description": "可选：深度层索引（0为表层）；若变量无深度维度则忽略" },
+          "output_granularity": { "type": "string", "enum": ["month","year"], "default": "year", "description": "输出粒度：'month' 返回逐月序列，'year' 返回按年聚合（默认）" }
+        }
+      },
+      "DecadalPredictionResponse": {
+        "type": "object",
+        "properties": {
+          "attribute_matrix": { "type": "array", "items": { "type": "number" } },
+          "attribute_description": { "type": "string" },
+          "visual_base64": { "type": "string" }
+        },
+        "required": ["attribute_matrix","attribute_description","visual_base64"]
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": { "error": { "type": "string" }, "detail": { "type": "string" } }
+      }
+    }
+  }
+}

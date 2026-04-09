@@ -1,0 +1,83 @@
+/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/functional.py:504: UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at ../aten/src/ATen/native/TensorShape.cpp:3526.)
+  return _VF.meshgrid(tensors, **kwargs)  # type: ignore[attr-defined]
+/root/miniconda3/envs/orca/lib/python3.10/site-packages/transformers/optimization.py:391: FutureWarning: This implementation of AdamW is deprecated and will be removed in a future version. Use the PyTorch implementation torch.optim.AdamW instead, or set `no_deprecation_warning=True` to disable this warning
+  warnings.warn(
+  0%|          | 0/37015 [00:00<?, ?it/s]/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/utils.py:166: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  storage = elem.storage()._new_shared(numel, device=elem.device)
+/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/utils.py:166: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  storage = elem.storage()._new_shared(numel, device=elem.device)
+/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/utils.py:166: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  storage = elem.storage()._new_shared(numel, device=elem.device)
+/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/utils.py:166: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  storage = elem.storage()._new_shared(numel, device=elem.device)
+Traceback (most recent call last):
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/train.py", line 213, in <module>
+    main()
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 346, in wrapper
+    return f(*args, **kwargs)
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/train.py", line 187, in main
+    train_result = trainer.train(resume_from_checkpoint=checkpoint)
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/trainer.py", line 433, in train
+    return inner_training_loop(
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/trainer.py", line 701, in _inner_training_loop
+    tr_loss_step = self.training_step(model, inputs)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/transformers/trainer.py", line 2699, in training_step
+    loss = self.compute_loss(model, inputs)
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/trainer.py", line 208, in compute_loss
+    outputs = model(**inputs)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1518, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1527, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/parallel/distributed.py", line 1519, in forward
+    else self._run_ddp_forward(*inputs, **kwargs)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/parallel/distributed.py", line 1355, in _run_ddp_forward
+    return self.module(*inputs, **kwargs)  # type: ignore[index]
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1518, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1527, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/model/orca_dl.py", line 749, in forward
+    return self.forward_single_step(ocean_vars=ocean_vars,
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/model/orca_dl.py", line 667, in forward_single_step
+    logits = self.dec_ocean(x, lead_time, enc_x, self.all_land_mask_pad, self.all_land_mask_pad_shifted)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1518, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1527, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/model/orca_dl.py", line 325, in forward
+    x = self.decoder_list[i](x_split[i], lead_time, all_enc_x[i], all_land_mask_pad, all_land_mask_pad_shifted)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1518, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1527, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/model/orca_dl.py", line 262, in forward
+    x = self.stages[i](
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1518, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1527, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/model/layer.py", line 485, in forward
+    x = blk(x, attn_mask, attn_mask_shifted, lead_t)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1518, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1527, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/model/layer.py", line 360, in forward
+    x = self.forward_part1(x, mask_matrix, mask_matrix_shifted)
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/model/layer.py", line 327, in forward_part1
+    attn_windows = self.attn(x_windows, mask=attn_mask)  # B*nW, Wd*Wh*Ww, C
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1518, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1527, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/model/layer.py", line 256, in forward
+    qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1518, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1527, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/modules/linear.py", line 114, in forward
+    return F.linear(input, self.weight, self.bias)
+torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 34.00 MiB. GPU 0 has a total capacty of 79.25 GiB of which 15.38 MiB is free. Process 3932446 has 61.14 GiB memory in use. Process 3956913 has 18.08 GiB memory in use. Of the allocated memory 17.16 GiB is allocated by PyTorch, and 222.55 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting max_split_size_mb to avoid fragmentation.  See documentation for Memory Management and PYTORCH_CUDA_ALLOC_CONF
+  0%|          | 0/37015 [00:40<?, ?it/s]

@@ -1,0 +1,1321 @@
+#!/bin/bash
+# CMIP6 高速下载脚本 - 中国大陆优化版
+# 特性：aria2多线程并行下载、自动选择镜像、断点续传、校验重试
+version="2.0-accelerated"
+
+CACHE_FILE=".${0##*/}.status"
+ARIA2_SESSION=".aria2_session"
+DOWNLOAD_LOG="download.log"
+
+# ========== 配置区域 ==========
+# 最大并发下载数
+MAX_CONCURRENT=8
+# 单文件最大连接数
+MAX_CONNECTIONS=16
+# 单文件分片数
+SPLIT=16
+# 最小分片大小
+MIN_SPLIT_SIZE="1M"
+# 下载超时（秒）
+TIMEOUT=120
+# 重试次数
+MAX_RETRIES=10
+# 重试等待时间（秒）
+RETRY_WAIT=3
+
+# ESGF镜像节点列表（按中国大陆访问速度排序）
+declare -a MIRROR_NODES=(
+    # E3SM主节点（文件最全，优先）
+    "esgf-node.ornl.gov"                 # 美国ORNL（E3SM原始发布节点）
+    "esgf-node.llnl.gov"                 # 美国LLNL（全球主节点，同步最快）
+    # 备用节点（仅当主节点失败时尝试）
+    "esgf-data.dkrz.de"                  # 德国DKRZ
+    "esgf-index1.ceda.ac.uk"             # 英国CEDA
+    # 亚太节点（仅非E3SM文件使用，暂时注释）
+    # "esgf.nci.org.au"                    # 澳大利亚NCI（亚太区较快，E3SM覆盖不全）
+)
+
+# ========== 嵌入式下载文件列表 ==========
+download_files="$(cat <<EOF--dataset.file.url.chksum_type.chksum
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186001-186412.nc' 'http://esgf-node.llnl.gov/thredds/fileServer/css03_data/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186001-186412.nc' 'SHA256' '8a1bb92b757a140fe9a2f70279f9848d4d692b99c8143cdfe03cea8d07b94da0'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195501-195912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195501-195912.nc' 'SHA256' 'f5de49cc7959f7d474bcb052a1a3ff00af4429e99b50a3495f4460c9a516dd1a'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197001-197412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197001-197412.nc' 'SHA256' '246d1b72eade361e84029cbe2edbdf686e85024c3f10c5733d671f1ebe7fe426'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199001-199412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199001-199412.nc' 'SHA256' 'c7d11544629592d8f563a5c5a6663a5f7daaa4b24c8aba08aed29cf51115e51d'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200501-200912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200501-200912.nc' 'SHA256' '683d7e81b4720f6b1704184099bde372216380f502baeca40a7a94e1839ec79d'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197501-197912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197501-197912.nc' 'SHA256' '1f773c3de97690479c738e3855d3a6b3f3c49ef2d5e4d1eeba4672adf2dc32bf'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187501-187912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187501-187912.nc' 'SHA256' '00cdbd2b22735d25c2375531efc5e0bdb94d4806072ae92cafd941eeb84285de'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192501-192912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192501-192912.nc' 'SHA256' '07ee929933847bf0d6302e97d78a2e25ba6bc4eef9cef09cd72b306e90366690'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193501-193912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193501-193912.nc' 'SHA256' '7c4d4191395bcec7fabc10a4e2f76ebed8610a3dac319918c1cc8b9f8a9876ae'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194501-194912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194501-194912.nc' 'SHA256' '19ba582bf50bd56fe7b8aca81a807d2c03e68449cd1875e7966425a5e9db819c'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187001-187412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187001-187412.nc' 'SHA256' '2c97ac7a2b5fc83f8a1291ed4d5e504296aa3ddc597b0a9b4a2e3838c79ba9bd'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188001-188412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188001-188412.nc' 'SHA256' 'adf2317f9d86be6d0df2659034b17f65bd55d31a75e38e828f51f4b66dd57ce7'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191001-191412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191001-191412.nc' 'SHA256' 'bd6f56704f9005348c29cdf60052f92fefa4bbd23f5b2c938739cd5fe5b3d1ff'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194001-194412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194001-194412.nc' 'SHA256' '2469263daa807958f5b7021563b65f9c430a6d7c16df7a66b849c3dec54c7fa8'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188501-188912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188501-188912.nc' 'SHA256' '36d18934a903c1af13cdbeace99ff9e2f7846becdd71b5b9e452d4f6fd4aaa4d'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194501-194912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194501-194912.nc' 'SHA256' 'a566419ed4ff72021a34942314e5e8ece006365b35aa07e18c25374a1aaf1cef'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198501-198912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198501-198912.nc' 'SHA256' '98eb244aa64e6f391fbef01dae7f0cd1a79d89996cfb7a12ae341143a981ad84'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191001-191412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191001-191412.nc' 'SHA256' 'dd627e0acac9f10cb1b8a06239cb0b5d8926e70f8b0a6d2e56f6ba0b00148c8a'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200501-200912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200501-200912.nc' 'SHA256' '2388d12a43049929aa00393d5efe086d67b3a1b55b733384a73c8f6f9dcfd9fc'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194001-194412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194001-194412.nc' 'SHA256' '25dfb92f23bc109501f24551fc912861670a74713e90e32e8262cbaa6c49441a'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200001-200412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200001-200412.nc' 'SHA256' '1ea282853dfd72d8f2cd3a1b93719c58f87f160a53cd35f61a3bc6031b61b79b'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185001-185412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185001-185412.nc' 'SHA256' '945f8afd46df811a9e604cd95a2279b1749d0e80f478897fc2da447d7350c448'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189501-189912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189501-189912.nc' 'SHA256' '5dbdfc12322073ac5b355ff95a16951356963e6c2b5a3683db6660016935f340'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190501-190912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190501-190912.nc' 'SHA256' '3062e812869a7bea3b5c347f115c1b32c0d02b84930379820ad6b4fcb77f1363'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191501-191912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191501-191912.nc' 'SHA256' '6dffe52692f23d1fbe9ce95f1d0a7892bb0a1943a1992f1f5e849e93a8ea4d20'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192501-192912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192501-192912.nc' 'SHA256' '3ca06c99456baa0a1c31b065d83053baa3804657c8dd28b76201f8ad3e5fa7aa'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193501-193912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193501-193912.nc' 'SHA256' 'b9219e9098349673702a5d5cdaebdc31e78a1a95ea8af98b4ef8b1b6a0600fd4'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194001-194412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194001-194412.nc' 'SHA256' '42c52451be57266b605eef6711af1f87da6fcdce95f7d7821048b2c5838fe688'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185001-185412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185001-185412.nc' 'SHA256' 'fc998ca06a2666fe29eb7e71fa637aff507564602c7a6a5c4b24bc01a27253b0'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189001-189412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189001-189412.nc' 'SHA256' '4ae53568aab191528d46d0d3f5baab51a24d38863c9d54afc8fa6682bf494602'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193501-193912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193501-193912.nc' 'SHA256' '4b94bb3e474af076a5c92050896b64067eaf3857fdf973699e14e28e67b8e4ee'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196501-196912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196501-196912.nc' 'SHA256' '63924c5b266d635b98ea909453cff6fc992d34fe2a4f1c5fd8bdcfae367bb8e8'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198001-198412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198001-198412.nc' 'SHA256' '428aeef043cdb4aec738661c67ebae5cfc581e420b5703be3674f90460a74297'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_201001-201412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' '7ca3d812bb98700748ad7b91400a6e9dcc54f66e58e57fece429587a440a94ef'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193501-193912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193501-193912.nc' 'SHA256' '0aa495dec27f7d843bdc06f9bca32cea6d3cf6f90e40c0581555e491aee78939'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186001-186412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186001-186412.nc' 'SHA256' '83f2189f7a31375e85ef0ed6ec6874e96e3bdef399a9ec843ae9ff7c0c52bdeb'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192001-192412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192001-192412.nc' 'SHA256' 'e6abd881a9981fb809c03b9292a363873f4cd14c5ab9549194cfee71f3e26120'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188001-188412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188001-188412.nc' 'SHA256' 'f2666ec9b7e5a29e5f71a054fe79679564c03e3d8ef7bfc1ec5a69ddeef182fe'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191501-191912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191501-191912.nc' 'SHA256' '056d966025e7c725469ca2c5cb8bba7fb7291288cead2b045b7f468e3203e2ec'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192501-192912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192501-192912.nc' 'SHA256' '5c0aca794ca9eae949854a4703717e54baf406f95eae0c24257af02a6118ce29'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197501-197912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197501-197912.nc' 'SHA256' '9f10251bdd118a652b30a7dd72432c3dbd9771fad461539eca52a7d8b4befc1d'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187501-187912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187501-187912.nc' 'SHA256' '492d772b34a10cc43cfc507b156579cb993d98877bf378233098c7a3fd409832'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196001-196412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196001-196412.nc' 'SHA256' '8c22b947d57ed97016d1d0e967143920d015d96c843bf6802f14c2170475db5c'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_201001-201412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' '2f5619385b2e77d18f762166a9341529c95a0da512568abd59218a3b953c43e4'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187001-187412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187001-187412.nc' 'SHA256' 'c543432ec3d4434dc7f2c531e8ea1a1103ef5ce0bfc018ff7480bcb887df29f0'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191001-191412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191001-191412.nc' 'SHA256' 'd8cda1f4c55dc6ac8bebdca55b56e978e8f62a94c51ba29295de12cd74a9989b'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192501-192912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192501-192912.nc' 'SHA256' 'd216905da3ae1f7d56bac936aeac5816bcf8eacb99095df8a0bc23a742c7d5cb'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187501-187912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187501-187912.nc' 'SHA256' '978baa10e467ebfc157c18e9fb235342177e90eaf42c76791f0a91b7d30f759b'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191001-191412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191001-191412.nc' 'SHA256' 'a4b892a43e9acdec0663ddb2baa0d56ad3b36b607366841f5af6ed0c51e47c0a'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196501-196912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196501-196912.nc' 'SHA256' '6ad1ba4d10bed33c4267670147ca276d3f3cdc906a8c023b387e8ba54be68403'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200501-200912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200501-200912.nc' 'SHA256' '0854806974f91eee7323225da634104cb993caa70b805d1b9b3a692fb558a9b2'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185001-185412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185001-185412.nc' 'SHA256' '96c75a4a138b32228fcbf6bbc59a02c57c33581879a53864ce856223a789e188'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187501-187912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187501-187912.nc' 'SHA256' '519e4d91622e33a2c2965b93a4c5359192cd09ddc9b73aaa543691f825fb7a50'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188501-188912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188501-188912.nc' 'SHA256' 'dc3709aa69f2e916cc646908f520470433c333914d328cf0a002e058564326a5'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191001-191412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191001-191412.nc' 'SHA256' 'edcebd730c582a86b20f72d729c80326f39917f1a4a4eb8743d0db04995ea4f0'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195501-195912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195501-195912.nc' 'SHA256' '671174e60cec1103d3164cc6637f17f0cea026aabba2f9b4fc011591fb81cdd8'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200001-200412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200001-200412.nc' 'SHA256' '6a81103f84c7d75cd4d89797458d853cf75d1a3bcf8416e423ccc4b496476309'
+'tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194001-194912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauuo/gr/v20221112/tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194001-194912.nc' 'SHA256' '66d77a06f8bea4d68a94bb54718165fcb4264cc5fb53b954177ed78683ce254d'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186501-186912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186501-186912.nc' 'SHA256' 'b38da1d96904dae6189049459b5c55c91ea71719f579f3cc876898b8afb21ece'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187501-187912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187501-187912.nc' 'SHA256' 'f0cdb67649e8c86b08519ee95a6399f06939b4e07a5b8bea2c4a9516f8bf8b71'
+'tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190001-190912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tos/gr/v20221112/tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190001-190912.nc' 'SHA256' '1120c73722aa4b861dbee923ec93ad76b334611954c1878abe380431ea8bad82'
+'tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_201001-201412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tos/gr/v20221112/tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' 'c51993cb690028f42d4aabf92aa13e567c98660795208ee1766251200eb984c2'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190501-190912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190501-190912.nc' 'SHA256' 'd558415ed50c5cfe31f16f8431b4929fcd10bf7cd7d151de683076772f930ad2'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193001-193412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193001-193412.nc' 'SHA256' '832efb569f7e6f8945ea6cba9d6bd4921b2d2b1b961b4d15238fc2f4c8c92ccd'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198501-198912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198501-198912.nc' 'SHA256' 'f1d6737b3f40183966ce6dc334707556cc4d973153584704f4938272d0879ff2'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199001-199412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199001-199412.nc' 'SHA256' '4dccca9456ff6dc0a1dc24696f1a44931ef896fb9b57f785d39740d5cdaa089a'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186501-186912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186501-186912.nc' 'SHA256' '06cdf6fc9b4242df6848bec03f0ad0806687111630f2425e54ac8aa6ba305ac3'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191001-191412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191001-191412.nc' 'SHA256' '6bc58fed12bbb1d7c1aeeaba749741016e6431a6ee1b6972ed424968414732dd'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197001-197412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197001-197412.nc' 'SHA256' 'de47baf5bc476816cd15a0897504e85d1679d08a2504900325e50005d48ea2aa'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_201001-201412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' '9671a33acc80f9705d3c9f839012c58a6522b84d8bd2e2cbe06a7752fe330079'
+'so_Omon_MRI-ESM2-0_historical_r1i1p1f1_gr_190001-194912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/css03_data/CMIP6/CMIP/MRI/MRI-ESM2-0/historical/r1i1p1f1/Omon/so/gr/v20191205/so_Omon_MRI-ESM2-0_historical_r1i1p1f1_gr_190001-194912.nc' 'SHA256' '420cf221c9e935da8cbccf11df938997ca46de8cc60f638837ddb559219275bb'
+'tos_Omon_MRI-ESM2-0_historical_r1i1p1f1_gr_185001-201412.nc' 'https://g-52ba3.fd635.8443.data.globus.org/css03_data/CMIP6/CMIP/MRI/MRI-ESM2-0/historical/r1i1p1f1/Omon/tos/gr/v20190904/tos_Omon_MRI-ESM2-0_historical_r1i1p1f1_gr_185001-201412.nc' 'SHA256' '86cfcf391f4831abe7a8047a5d51308ef2d82eb3302237284d6e441b454cbe6e'
+'zos_Omon_MRI-ESM2-0_historical_r1i1p1f1_gr_185001-201412.nc' 'http://esgf-data03.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/MRI/MRI-ESM2-0/historical/r1i1p1f1/Omon/zos/gr/v20191205/zos_Omon_MRI-ESM2-0_historical_r1i1p1f1_gr_185001-201412.nc' 'SHA256' '98fc43d52c9d29957067f7ec0f63f18eb9e63e664af3465fc5c5cf3d1beb3a2b'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194001-194412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194001-194412.nc' 'SHA256' '1e444e25174647d41e70f060a632f85dbbe98cbcf463746656bdee0bb0e45ca8'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199501-199912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199501-199912.nc' 'SHA256' '77df7af2e3823e645e72cb0b838340ab6eb9bd2750e6e9da26b86666f362213c'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185501-185912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185501-185912.nc' 'SHA256' '0891a7e53578465dd2fcf3e843f9f279dc6ec4633684670e9bce626ff7a28b53'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189001-189412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189001-189412.nc' 'SHA256' 'bd14183209b7ff696df4007398cb49b1c41f348c4070d0424765a7d850085ece'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195501-195912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195501-195912.nc' 'SHA256' '277b7ea6bf76b9566a60dc338341b29b8ccf9ef7adb1554d83f2a3f5a80c3e1b'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185501-185912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185501-185912.nc' 'SHA256' 'a3ae0ab771fdbda0e049a9510b2b3f07315d7ecd6f9d975c5e28781780c6a88d'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190501-190912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190501-190912.nc' 'SHA256' '566f527c50ac5de22047369f66e8b48ef792237af086c3b494a9eef61c0e337e'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193501-193912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193501-193912.nc' 'SHA256' '0cdfc0c93b3bb3568e90c72e6f1d5e8aa46a73e4d6e5daad7552a5eade56f23a'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195001-195412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195001-195412.nc' 'SHA256' '864e0e1d70b7376f8eaca7456689ad42cd75110a8c1fec834bd1380053bc4d0f'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185501-185912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185501-185912.nc' 'SHA256' '5299f142d059ec1e1d4fad2321948dd446d2b9fbb9a899362a519bb8bdceb5aa'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192501-192912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192501-192912.nc' 'SHA256' 'cc46601e0177cdbff1496801eb44e486e8c6f71e86a21d1ab5ffff492baabcf2'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193001-193412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193001-193412.nc' 'SHA256' '24f8af099bfef8d8324ec5a787d44abe8bdac6ea154041c438732f25b280d847'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200501-200912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200501-200912.nc' 'SHA256' '508c4c4f66b5a327bbf51bdc2373730d7f4944fc8958df6db6e02bf7387dc093'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194001-194412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194001-194412.nc' 'SHA256' '1dc23378fa6783d5456022f4c445d570ad917afa6176b0be124c019f077a810d'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197501-197912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197501-197912.nc' 'SHA256' '70d5b93ae8a3bdeed6a1d2aab40f2b963ad25f6bfaa6c9fe97acf635957740b5'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200501-200912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200501-200912.nc' 'SHA256' 'b1411277eeace984077c05518a82c648bc66f5132989258c3db14e82f293907e'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187001-187412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187001-187412.nc' 'SHA256' '72e3dfc452eca9558f5fc9ab2ca2f8f546b1b703918bbe5100d2c00465663475'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198001-198412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198001-198412.nc' 'SHA256' '75490b858a4655dfb21a1e125e34c8eb44ac3f19c5b6ce5f4357a134a07b40ec'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185501-185912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185501-185912.nc' 'SHA256' 'c55bdb671ed114a149da68240b5af81aeb01d9e566d33600c1c72933747d4ea3'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187001-187412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187001-187412.nc' 'SHA256' '0eb75d9255a64f6c24f328eaa328805d4392e5aec454602c4e6c2067a8ed1e21'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188501-188912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188501-188912.nc' 'SHA256' 'cda6b0787cda3006a944678f3de30f8b33d416dc28728d51af5ab15438b83665'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195501-195912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195501-195912.nc' 'SHA256' '94e9757cd5bfe1c7c194f422376dd4ad3d64fe1829a2d138e99a749beab4d525'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196501-196912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196501-196912.nc' 'SHA256' '5725dd02ff3c565bb0a46525274db1fd995ab9c4c9e24663b0eecb585c895e2c'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200501-200912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200501-200912.nc' 'SHA256' '3de12998302df5957ab2fe9e666bc746ee129f7c1fbebb02114ff17dc188f89a'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187001-187412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187001-187412.nc' 'SHA256' 'f0cdfcfd9ac13c712e10d6bb7bc961ccc79ad8782a5e9fe7661472df3145fcd2'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185501-185912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185501-185912.nc' 'SHA256' 'd1b6d149f5d830cd90090b9d01a1b15bc906fd6e85edc633245136c0c2048194'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194501-194912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194501-194912.nc' 'SHA256' 'd6a55f04f7e8410bf5bc11a87bcf7fccf5661a2133a248cd8ab9fc1abfcceb77'
+'tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195001-195912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauuo/gr/v20221112/tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195001-195912.nc' 'SHA256' '421863dae0ef25b08b12eac10573866f8a1d816a6877928b86e44b332672c8b7'
+'tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_201001-201412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauuo/gr/v20221112/tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' 'fdd2228b2da19096d9022c926c6d3656ce041b15292b52a272b49ef2116dbfea'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191001-191412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191001-191412.nc' 'SHA256' '2ef2bc62ce62612ddf3c8fe4271d2f17410d69b8c341cdd333d129757ef198c8'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193501-193912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193501-193912.nc' 'SHA256' '3fc62363c0bfe75c4ff29030754e61f998f98ae86fd20aa5a5a65e042ec2a1b1'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195501-195912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195501-195912.nc' 'SHA256' '5491c072f79c5bf45b9a2530aedb7e5ed8c9a8e4f1375ed29daf1081b07c6795'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197501-197912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197501-197912.nc' 'SHA256' '2a9548a9d4c24b70dc4368800d59a288bf5d97652efab27aa527a6bf5dfa4940'
+'tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197001-197912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tos/gr/v20221112/tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197001-197912.nc' 'SHA256' '47bd10af1f8b65c7c759f45e87dd30011d6ab1f8d1922a39e5aa91e91b5769e0'
+'tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199001-199912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tos/gr/v20221112/tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199001-199912.nc' 'SHA256' '1376e99a4b945b6224fba4a8664d90da053996aa62241710dc12ff5483e63406'
+'tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200001-200912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tos/gr/v20221112/tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200001-200912.nc' 'SHA256' 'ec1f83f7e1d3d68891d42560d213159d28b6b70342f4adc07e7757295f3704e9'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186501-186912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186501-186912.nc' 'SHA256' '9fa00465ca0d6804ac41a7976e44954ecd5cf79872aeb75601bb604554b21086'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196501-196912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196501-196912.nc' 'SHA256' 'faba3e18d4747cf2e8bf762efd52b295e3165b9ed760945e86ae23a8a2fc9f2e'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189001-189412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189001-189412.nc' 'SHA256' 'e4667416c90beeb070c7187d3d7437d65c18355eb39a90f98fb4d7dad47ff4d9'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200501-200912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200501-200912.nc' 'SHA256' '8311c17d89a17696f4278de6cc818d16bc756e4e234267a826595e76d098caa5'
+'zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191001-191912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/zos/gr/v20221112/zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191001-191912.nc' 'SHA256' 'f6ad32512ac497def02cd4cdb30f2772b4115f6dd6b9a4504295341f4e982111'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191501-191912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191501-191912.nc' 'SHA256' '6f25dc1a4d0ba9987df59cea8b4162019f744d3c897593718d8de2e4a96f0b14'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196001-196412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196001-196412.nc' 'SHA256' '78ec5947169d2cb2a49ec73ff4fbe5ad2e1f7412b31430df60f98af5d1107cf3'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187001-187412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187001-187412.nc' 'SHA256' '60fab6b9b9e726b7dd9dd5775d56571b1e19977b1c316df866d8aeae8d4c10af'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188501-188912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188501-188912.nc' 'SHA256' '506627f243ce3fbc2de00bfce4e196c6ac0f4ab23cc646bc29f85264f1052e0d'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195001-195412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195001-195412.nc' 'SHA256' 'cb4dd2b55e3fc6faaa38a03d33d5e2535a8262b916eb42383a138ae8b872739d'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185501-185912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185501-185912.nc' 'SHA256' '174b7f87bb03ffaff592dd821c106e43549f7461d5a4f78d3000c98a92eee090'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190001-190412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190001-190412.nc' 'SHA256' 'c768b979070f518a029450785f28ab429664c637c253987ad8e5cf8ff6a976f0'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_201001-201412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' '7e0042ee5c9206d58b0a8835b76447015a42e1da9e23cc523250cacfb68a13f5'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187501-187912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187501-187912.nc' 'SHA256' 'a179b9bb93dc9702bd81da0cb5732e5dbb1a5b41197be7ef29998b7f91f93544'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188001-188412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188001-188412.nc' 'SHA256' 'b82ec1b08c31c3853e740a752fa591881aa4cec4cba7924d2257bae84b68b629'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190501-190912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190501-190912.nc' 'SHA256' '1bb486731ad217820f8ba5e420ccd786588dd72b1a5444ec505cc6738bba212f'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192501-192912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192501-192912.nc' 'SHA256' '93d3de52b920c17502ed6a5ea1af07b1456cdcbd3711a389084d64af850ff0b1'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_201001-201412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' 'ce7d8543eb9abe2ee2b352ac777377a2cd9bb7627b732e40e360634507fc11e1'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190501-190912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190501-190912.nc' 'SHA256' '7f0bcb30fb8518f29094bc0575715091d325d13a700bb4d8691591ec1fd2410c'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189501-189912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189501-189912.nc' 'SHA256' 'b74d3103a8578c070e359b2990f6692735649ca43820f8b25495d34dba26c357'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_201001-201412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' '4a5223b896467c49748e7ff816768a20eafadfec92af206830eb0bb1815f2d90'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187501-187912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187501-187912.nc' 'SHA256' 'f26dc338c3126ca3df1061fb13ec0da069ce0cf2e87194f95522d0170918f25b'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188501-188912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188501-188912.nc' 'SHA256' 'af0874b7d88c62ee144bd84c61c974cd87fc1e7d72c6a0fc550276774ad63b7f'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191001-191412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191001-191412.nc' 'SHA256' 'a84f4c630e1794beec5a2206fa1fd32cae27e4e1875325ed1bff4a78fda141df'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195001-195412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195001-195412.nc' 'SHA256' 'cb63e66306b4093873e6fa6ccd004f634b12d6890f7227620bee368956a4b3d2'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199001-199412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199001-199412.nc' 'SHA256' 'ef6f44b200c768bb857d29eaa6d066d9e395fda1acf716898b873a488fc209b5'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200001-200412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200001-200412.nc' 'SHA256' 'b1b026b6f555a71cc915b7dce346278a59d59b3341b6602e401cfa79967718f5'
+'so_Omon_MRI-ESM2-0_historical_r1i1p1f1_gr_185001-189912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/css03_data/CMIP6/CMIP/MRI/MRI-ESM2-0/historical/r1i1p1f1/Omon/so/gr/v20191205/so_Omon_MRI-ESM2-0_historical_r1i1p1f1_gr_185001-189912.nc' 'SHA256' '244e43c03cea391801d67fe9470766cadbc987093f89fc8f7d838f3216f29159'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186501-186912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186501-186912.nc' 'SHA256' 'b7799267955094ba36fb37d5860475c81fc5c136f95ef0aa81a129c054be933f'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188001-188412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188001-188412.nc' 'SHA256' 'a327d52f46b9733b27259170dd8ea47180485a8308807a52467edb2d77c46ee4'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195501-195912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195501-195912.nc' 'SHA256' '897037d1d54e47c8f4de6355ac5126cbbc526d494e36beae8599da52e7898558'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190501-190912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190501-190912.nc' 'SHA256' '0c62d8083830650b1b43b0bc7e4c102d7e7d17c069ddca3d06d0d48474472c7d'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191001-191412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191001-191412.nc' 'SHA256' '45d3153d5688981374efe3c4989f75427d70ca412b2cacdd77deb84e1f1d4d02'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198001-198412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198001-198412.nc' 'SHA256' 'c366b44f48c1d43174374772e685b687ea48da65101f42d8b8a52846a769c566'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185501-185912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185501-185912.nc' 'SHA256' '2cdf643d78d92a82a2507406b1edf6990d9b88c1de131216bfca529df45dff46'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191001-191412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191001-191412.nc' 'SHA256' '1bbb0ec9aac6952b6907a8fececcadd630b87a95c87e233ddd1e8fddb5393a45'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193501-193912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193501-193912.nc' 'SHA256' '34b07ea2a6e788d4e732455fa3ef1ed072c5a52ac21e5013120385fc65e05680'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197501-197912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197501-197912.nc' 'SHA256' 'eb4e4538b7239bc4f2c0cb379e2147290898bf197034e2c34763b21111765865'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200001-200412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200001-200412.nc' 'SHA256' '3f8cecdfac43ffbe8af78a8f254447ebc2193544b4ca9cf5124d7746b12e497d'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185001-185412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185001-185412.nc' 'SHA256' '361b3a93ebee0ddebbf9c04cb0e911110f36141f1341bbf4a30bfbcd3babd199'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193001-193412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193001-193412.nc' 'SHA256' '9f9d73bdfb07c67961cc452470db161797daff71cfb3dd2fed3d59850a325024'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200001-200412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200001-200412.nc' 'SHA256' '5429fbacfa7ebd2446e34530d93e4ae5196f0da97de71f6ae1ed31fb8b7c0437'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186001-186412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186001-186412.nc' 'SHA256' '2b4dcdc5a6a7238c2c7098e05849ba35b5d0286fcda678dee265bb04b5a1bce9'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192001-192412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192001-192412.nc' 'SHA256' '36ddff3ed3ab7c13408fb99608470f5cd4343f36901ecdca167a2969581fd898'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194501-194912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194501-194912.nc' 'SHA256' 'dc522b29253f187247663d413cee1d08e189b191de2535d18ca5145a021738ae'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200501-200912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200501-200912.nc' 'SHA256' '76504b1ac29df940ab17b2d1853f2efb5a558fee9a93b419719145dfa9bac72a'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186001-186412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186001-186412.nc' 'SHA256' 'f935f11395d7f35fc275822c3d572cd95f6b20656c2e93f20d13568d2f2e673e'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190501-190912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190501-190912.nc' 'SHA256' 'b8943e534badacd1078017649c28a268b3f3a171ff520cb9abe2d4f634a56fe3'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194501-194912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194501-194912.nc' 'SHA256' '5ddfb30456c2530e2b2e46c624a3541e50d448c12a187967f6049b4cf9f6c45e'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197001-197412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197001-197412.nc' 'SHA256' '11c9d0908d34f44b0ef6e1a06360e093de96076b2062a709def6298f9f2902a1'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199001-199412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199001-199412.nc' 'SHA256' '6140634d643a07b6430f0146fd5a91bdd1db4af796345faf63f03bb3a08e4db9'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191501-191912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191501-191912.nc' 'SHA256' '072d229e55166f3a8e020f48a4f202b7a91f36e7e0eeb32ae3c49e6928389e78'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193501-193912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193501-193912.nc' 'SHA256' '78dde71b4b09f0125495957e2eb96705b946e4cd3676a152a9e8bf1d4583514b'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197501-197912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197501-197912.nc' 'SHA256' '1219001d19ccfbdd661a16ef52eaa70e8e97d5fd644ddc85924ef216b5874fde'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188001-188412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188001-188412.nc' 'SHA256' 'e5f9d81f2b65a6a697a0792b38f32bfb1d9b50771d6d14768dcbad402343fecc'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194001-194412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194001-194412.nc' 'SHA256' 'cfeaffab533228b2ebed83a577ba69a32aa6cfbe0aa1278a25ddc2c2884778ce'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194501-194912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194501-194912.nc' 'SHA256' 'f9304f200f3bbf8fd358041039f398177646a1b6bd36c74f417d3256183b4bf6'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198501-198912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198501-198912.nc' 'SHA256' '4834cb2215fb0c48216f74c9271c4c57f322cfd385ab0e9691e6e3bf565a6efc'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187001-187412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187001-187412.nc' 'SHA256' 'e29272ac1753a64552e107ca3135b204a760e7af99fefe9f58ee5506ff4fb988'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187501-187912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187501-187912.nc' 'SHA256' '18ea8701d1c2b3f530204b8bfe6444131f857276e02929f782d8ca3b27fdbb34'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193001-193412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193001-193412.nc' 'SHA256' '336aab7e7c9f9f5fa6f2cbf3dd750cc24c0cf1d401956bcc000aff9c11247fe2'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194501-194912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194501-194912.nc' 'SHA256' '8961cdc38133da03fa4a92c59b6dcec744955028622982bfd45468e6e660d255'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198001-198412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198001-198412.nc' 'SHA256' '5a21949427d7c857fce5d04617056f7ac9cb74714cfc9fb6447886a90997770d'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198501-198912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198501-198912.nc' 'SHA256' 'ad7222d07751e505e1d57db7cd183e4521f0265f587f6c052d9b1ca8c67ca0a1'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186001-186412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186001-186412.nc' 'SHA256' 'a6ba58eac5721c0e5e39b146593ea22f8ee173077d211696d1660f7d056c3b96'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192501-192912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192501-192912.nc' 'SHA256' 'b320eebc88c2e8ea6ae02bf500c4f68f11c0cdc6d2dfa0fad8d8af342b2ee91f'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192001-192412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192001-192412.nc' 'SHA256' 'e8a6430959199ff94a8e1038c42caf33b733ca5c44dd781d43d2fd14722fbd2a'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188501-188912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188501-188912.nc' 'SHA256' '961ec89ff046f898a74151cd6c46e638a206d2f51468d4467753b3761da84453'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190501-190912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190501-190912.nc' 'SHA256' '49e435c8eeecbca1dcadb48d1d5056f36cee7894b67591e231649b45942b8d69'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194501-194912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194501-194912.nc' 'SHA256' '00b73eb0bfe323939b59f0f90bcd44ea2a79d67024868b68db957845bb7b49f3'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197501-197912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197501-197912.nc' 'SHA256' '0c3fac58745ba7c46053745cd47d65011b068a47897f0ba5c4372bced26307b1'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198501-198912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198501-198912.nc' 'SHA256' '403882ee8773dc76e6bb64c1b5ce82d05c02cddb191150f0d0c3d544a25d2553'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185001-185412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185001-185412.nc' 'SHA256' 'a91858245e07ca83814393e38ad3dbb03ef419e199c4fe0eb8743c3f205155aa'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189001-189412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189001-189412.nc' 'SHA256' 'ce7204a1d3d23f51212daf4e5a3661ee4d1af99fb5910ad14cd983ebd5d870ce'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191001-191412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191001-191412.nc' 'SHA256' 'a508787d20e3aa4b94955bca5e8610b0fa9e2a06c3941c70014f0a31660a3b31'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191501-191912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191501-191912.nc' 'SHA256' '592573577610632289a5905679fb40039110d00556033536a695103b26ee9fee'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199501-199912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199501-199912.nc' 'SHA256' '81ec09436b4e782697ad583ef7507dbeab09d7bfb2811601c9195fc4e79c9320'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192001-192412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192001-192412.nc' 'SHA256' '3c7e349502254ee939d5a3bb2f85e6d97c4223bf76663448c47da3163f7dc6be'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200001-200412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200001-200412.nc' 'SHA256' 'f66859d22f07f1bfa53e41b028d7bf96438a7ae279bbecac7cc4230cfccac2d8'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196501-196912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196501-196912.nc' 'SHA256' 'ee6e721642396937e2cc1cea2240bf544779601bf49ed5c631d198b6d13efb43'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198001-198412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198001-198412.nc' 'SHA256' '2fcec42b0b85188eb1d5e0fe7228d930a63a74864b671b6e9b05d966c2d1c860'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186501-186912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186501-186912.nc' 'SHA256' '815782f9b0e361f49baf51e777c391817035a35e575d0ae7abcffc3d95f0421f'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188001-188412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188001-188412.nc' 'SHA256' '956beb1f79296b40abc1678f868c6afa5587a6999fc47a8788d54b9205653dcf'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190001-190412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190001-190412.nc' 'SHA256' 'f513ecbea10b64bdcc76c0f23b0d582dd1722a379f7e8cae3d3afe0111342ce9'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192001-192412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192001-192412.nc' 'SHA256' '793830b91bd3ce35b2eda8f72ea664ab82ffee2032cba549392b6ded3cd09a26'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200501-200912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200501-200912.nc' 'SHA256' 'ef7cc96dc7893af8d89a5c45b87898fe352f21b43ae0ec4d87be68812b91fe4f'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199001-199412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199001-199412.nc' 'SHA256' 'c4d2f542cc46b8f557938a3cf7e25532709dc2c357762d2e4f6524369bb468a7'
+'tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185001-185912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauuo/gr/v20221112/tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185001-185912.nc' 'SHA256' 'c916679c66ff2d44bb37e226a2d70af7c0c59a3ac69ff9dd352cdff695f301f4'
+'tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186001-186912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauuo/gr/v20221112/tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186001-186912.nc' 'SHA256' 'a591676a121150f8bc8547ecf5e54da9aa71d959c41acb6492240b584fb5f582'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187001-187412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187001-187412.nc' 'SHA256' 'eb83461ee5df855dfb63ccba863c6bf1bcccfa017a941c594be4f07da9ac36bc'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188501-188912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188501-188912.nc' 'SHA256' '8bc6110207e28acb880573f06b76d6b509fe920325ade7a3661c02c3991f22a5'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189001-189412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189001-189412.nc' 'SHA256' 'b12abbcdfe1b34c21a62f571b599acc0461378842545fb97a147215c1ac768d2'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189501-189912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189501-189912.nc' 'SHA256' '9da3b0990a35b4cc99e7aa09ab5a67ea54f46536a42fc54521c0f1402da42bdb'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191501-191912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191501-191912.nc' 'SHA256' '3795a6d76444e286ec60e0d7190e43750396e2c9b835387c87496031fb2ca368'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196001-196412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196001-196412.nc' 'SHA256' '0c9ce437dd1994f16531f4de6bdadc4ba4f163e238271519a67f75f4ac08f672'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200001-200412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200001-200412.nc' 'SHA256' '140cf7396aba07ddc141dd00cbb128a2c46a0174da553698cdb045e9eeb8df9c'
+'tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185001-185912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tos/gr/v20221112/tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185001-185912.nc' 'SHA256' 'e18115a285e6ba1230359d8f4a27c7f6711102be5426d5968dcbce3a6c486560'
+'tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193001-193912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tos/gr/v20221112/tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193001-193912.nc' 'SHA256' '51a000b06b7de9864d9b421afec0da1cec956638df59d791fa386e3ffb439845'
+'tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196001-196912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tos/gr/v20221112/tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196001-196912.nc' 'SHA256' 'cee2205e342e6fbb44ce347caa808c4c26b8d4cad27b67e5391e0c6d39fd31c1'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188001-188412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188001-188412.nc' 'SHA256' 'f313d8c3f94fa3a15c0994f61e5f07c5fe5c8485831fc0062dc25e0545e1fd7c'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191001-191412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191001-191412.nc' 'SHA256' '14f7b5f1ccd998b476c07a3f13329a6f97bc930c52b8634b25a0f20f1850519c'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195501-195912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195501-195912.nc' 'SHA256' 'f0dfc6b357964b3ef904646bbafe371e6189084f60bbfd34cb581d7f5059e1e8'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198001-198412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198001-198412.nc' 'SHA256' '55c21427160fa1aa458507a073671b9b7ac980cbae2f2899126b9d0e1bf37b2e'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_201001-201412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' 'bd4b93c04c324e68b20f65aaf40056e972b4cfad66b0c3862f7b4e9ad0b1b60f'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193001-193412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193001-193412.nc' 'SHA256' '9ea2c50364ad29f8172bd1cd049ddf9018121200b01a559d06d2014b1f3d5977'
+'thetao_Omon_MRI-ESM2-0_historical_r1i1p1f1_gr_185001-189912.nc' 'http://esgf-data03.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/MRI/MRI-ESM2-0/historical/r1i1p1f1/Omon/thetao/gr/v20191205/thetao_Omon_MRI-ESM2-0_historical_r1i1p1f1_gr_185001-189912.nc' 'SHA256' '6eccd042188f99fa7c09a38e56a7d0bfa507718e6cee595de0bf8499e2360170'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198501-198912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198501-198912.nc' 'SHA256' '987b8cce4cb51f2be5219eaa9b508985e8053825095445350a3e54f1c7a22b00'
+'zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187001-187912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/zos/gr/v20221112/zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187001-187912.nc' 'SHA256' '1df383cb1e535d0987ed91c4a6a1c725b1c51a78154a4a53d205ebfe49e7a721'
+'zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193001-193912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/zos/gr/v20221112/zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193001-193912.nc' 'SHA256' 'e2d89832699c97389feeb5acd7cf237a909a7455a266024b0df56bfa5e3ab7a8'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187001-187412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187001-187412.nc' 'SHA256' 'c4e9970dfb3e810678e1522798aef7d7a630a9b18cd47628d9f6bef52951c6aa'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188001-188412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188001-188412.nc' 'SHA256' 'd7072520d08a36c5d23610a810ab5f3d7d98b0a46dd36419fe18fbc139aaf01f'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192001-192412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192001-192412.nc' 'SHA256' 'caffb8184721e58259834baf3c59c82a7b10da7aea86467469148d26aaa84b33'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193001-193412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193001-193412.nc' 'SHA256' 'ffe3980290701280ca8c395486cd4356ade764b7b5a53a9644c0c0b3bc3ae7f2'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_201001-201412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' '975c541e27c9df9d3aefb78e84af51da0bae78baa4fe134d99eab7320e6afb18'
+'tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191001-191912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauuo/gr/v20221112/tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191001-191912.nc' 'SHA256' 'c46da9c065c4277179fc2a8817391396e95e94ebce230e7dafa0e8387eb4a3a8'
+'tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193001-193912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauvo/gr/v20221112/tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193001-193912.nc' 'SHA256' '292fa0207a3a43d41c5c7e9a366931d4e44eab8ef215d3ffeb785a147c66a60f'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185001-185412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185001-185412.nc' 'SHA256' 'de92e1223c335da021a27b278085446dfb0d019efa7d8b082ccb2b1003516805'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185501-185912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185501-185912.nc' 'SHA256' '85b50654d307431db92235c110e108b9d046c57fde8c256b5396982270e5213e'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186001-186412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186001-186412.nc' 'SHA256' '748b4a8d9721d5eb9152fb1866366d45bf2b6d7660697fe6d4a5d03ccc67fa74'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192501-192912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192501-192912.nc' 'SHA256' '4a1615d0811c6fbf89005d6400e4a57bd94d5790e3a8ceca23cf98d904270624'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193001-193412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193001-193412.nc' 'SHA256' '4b1da3370f3e6b0674f70eb7101f89c13d62979b01af2aa52fa75e4920313d5a'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_201001-201412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' 'a7ea9d6961422410e2207a8ff79a45ad68894b8fb454114d5dedc1479eb88ab6'
+'tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189001-189912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tos/gr/v20221112/tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189001-189912.nc' 'SHA256' '92bf8d764c1db0ed39dfdc81f14a377d4ec86fa3fe68def80861a906d6c81b17'
+'tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195001-195912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tos/gr/v20221112/tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195001-195912.nc' 'SHA256' '18cb38c34888c80181777dfe51c2ecf31742a410a1e50eaacff7e29fc59f2eeb'
+'tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198001-198912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tos/gr/v20221112/tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198001-198912.nc' 'SHA256' 'fd0a5980e3c148dc3cace25c6219addb5bba813548b879b27d868ddeb1d7374d'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187501-187912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187501-187912.nc' 'SHA256' '71f5ca1c1ce354e7f1e14a64c18e4507a5e9ab1cfb3dde2251d117525b3909ec'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188501-188912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188501-188912.nc' 'SHA256' 'f5dbed8bdd0f6f96f0aa9cf1500ad6f0d359f9dde5ddf69a2b5ea5f0db6907c8'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199501-199912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199501-199912.nc' 'SHA256' '41daa34ab2a48aa4936964fe3a685c1daf636926dd16c4a48398dc9c1cf323d0'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194501-194912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194501-194912.nc' 'SHA256' 'a5468ee9ea6234eeb7b61425d30f01b3afe66039a02da8512fddc040a9055bda'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185001-185412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185001-185412.nc' 'SHA256' '53c414282c097816bd664c6345e2b554ef798510c57d282f62a974027f826ca9'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188001-188412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188001-188412.nc' 'SHA256' '30bc9edb03a0a1283a0d3e50f947c602fbbde88a36e67f5b2255090c99d3b31e'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190501-190912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190501-190912.nc' 'SHA256' '0a03e31f7f184a7b07337a95eb77d01114d40188dc21f11d02e2adde09132cbe'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195001-195412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195001-195412.nc' 'SHA256' 'ab104fc17e413b632aca532d6ef6b75f742d3f3e7e46082d6783d856778c473c'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199501-199912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199501-199912.nc' 'SHA256' '36ca9591f287dc8e2181725daa936215964bd152e297d27b995d6e25785c8683'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187001-187412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187001-187412.nc' 'SHA256' '74f46e86aae62fe4422f6e3ac094703e19b621d165eb44c79047a15f257589ca'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190001-190412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190001-190412.nc' 'SHA256' 'db5a817bd681e5dc9079b36ad34ac704f65199496b9c19c3ad19b738cdec01e2'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192001-192412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192001-192412.nc' 'SHA256' '7dbd55f014c1711f79df9f8d1771c778d95a845d1fd34f76429cfdb125f70b0d'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195501-195912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195501-195912.nc' 'SHA256' '6a403d6b79202d6553241340e6d1aebebd6e88da676a4e3f90273583f05e88d1'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196501-196912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196501-196912.nc' 'SHA256' '9a713d29083329cc1e90174adae1c493d5d3ed9ffbc338d21adda0efbf8fd18f'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198501-198912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198501-198912.nc' 'SHA256' '3b1276a6b0f77eef4e7a957b8983b71fe0c2220a1e6f3b36677fc0936d23fe80'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189001-189412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189001-189412.nc' 'SHA256' 'ea651aae330d053aac5818bc7fa78bb3dc557f353242e8875caa7c6ae0658714'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191501-191912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191501-191912.nc' 'SHA256' 'ccd55e33fa95bb668ff3b403328831984dad94715d2747488ce2fc1b002749a5'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199001-199412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199001-199412.nc' 'SHA256' '91419ef6aa590bcedda3bb066aadb85e6b2d99d85f2305aa126855737b9ead7f'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186501-186912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186501-186912.nc' 'SHA256' 'b4c0f71d9beda141265d85983eb3d89ff9a4db0c20b208f86b066801a817f53c'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187001-187412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187001-187412.nc' 'SHA256' '4f7cd114e41fd975a02d80b60da66b1471af002a4dc75a19a31207456f9abb53'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198001-198412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198001-198412.nc' 'SHA256' 'a7ccea474e67813af1e5ff6edf55d320896604e3beb8ff20a6a5ec86cede0454'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199001-199412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199001-199412.nc' 'SHA256' '18c03ef7dc0d105a0acf004195e75e5cb1a256b835e8ae1bee1774e02a1937cc'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197501-197912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197501-197912.nc' 'SHA256' '2684bbbc55a85bc0a25b7c23347b53b855bbe1647388d45d0153c9ae7bcd5b93'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185501-185912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185501-185912.nc' 'SHA256' '9007854e04b5619ddf141e450296817bb978b633b293e7c6d319891ae87797ca'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190501-190912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190501-190912.nc' 'SHA256' '21791c4ad39592f041dc6ec28f674f69e889423f369253afc555b22f6b4e3678'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191001-191412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191001-191412.nc' 'SHA256' '3d51c3160263421a1b7c3ac175d042999c6359f4e396a502d392cdcf3f6fb368'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185501-185912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185501-185912.nc' 'SHA256' 'a4ce53aa646404a06236f459d63ef2b68a7e5b580b21e49be66869e686c85cd4'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186001-186412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186001-186412.nc' 'SHA256' '0dea9bf6b4a63b60b800aa983c7e25a9b407b37085a2406875f2306b0d06d4d0'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187001-187412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187001-187412.nc' 'SHA256' '18020e4703fb199cbc8a2a1f091517a234baad9df462de9b32cb24763ce1b5ef'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193001-193412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193001-193412.nc' 'SHA256' '3866d47d208eb4b1c5f74fc5cfa0c3c2c2a3e7f6f0f9a7fb50075e8ee5dd8395'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189501-189912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189501-189912.nc' 'SHA256' 'b70d385a66d05cb9683ab27186cdcc33e3f793d5abbfba2bf42bf16ea032a2fe'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193501-193912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193501-193912.nc' 'SHA256' '9db9a6191f323a00ef65245ccfd41d8b52927c05a5c53af945bca845acbe9c89'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196501-196912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196501-196912.nc' 'SHA256' '1471a899f9180e02b54dd1bb3a41adddfe1c5e52f639fcb0487cd4b760f5efe9'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198001-198412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198001-198412.nc' 'SHA256' 'd0a4d9b9d8772cc75ceca1f06c2f3c21274b9147a396181a9c1fdceae4193bbd'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198501-198912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198501-198912.nc' 'SHA256' '68dea59316cc7237250a49c969818adc185db1a9de0650110761714e1af9818f'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200001-200412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200001-200412.nc' 'SHA256' '9cb7c3b553e424eb6db7029079bfa9b200cf3897dae923f81c4d305f1cb6031a'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185001-185412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185001-185412.nc' 'SHA256' '65ec9747ea9d96074346de0f9b652f359a854f5758cca5d83e18865e35c349c9'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188001-188412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188001-188412.nc' 'SHA256' '6c97112315952b7e11e81f12552a577a99063c8bc222f2a139145849b682e0c3'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198001-198412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198001-198412.nc' 'SHA256' '9b4bde542879b6e79017262f22b100838b406b8a9ce0d1c0ab49164793ab34d4'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198501-198912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198501-198912.nc' 'SHA256' 'a2b916ccebc6920c3c2ae17b0e8fcec07a193baabf3eac7887de1b81c265b3d7'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192001-192412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192001-192412.nc' 'SHA256' '73f03732065adf5d45f7ab71ee44dc2262a68022aae46f1b00c72792181a900f'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195001-195412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195001-195412.nc' 'SHA256' '4910e66835da6eca5b6fddb5f00a52e94d47d469b126a244f3de008302915cd5'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198001-198412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198001-198412.nc' 'SHA256' 'cac56a5d3969c67a27d238ff7376a4d02264d2fe6017eed666a8fc68e74db688'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199001-199412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199001-199412.nc' 'SHA256' '4de9833e2e24ab2493d39ce66d6a7fc3f72ae92c99b8d5aea719512729a72580'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197501-197912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197501-197912.nc' 'SHA256' '8646af991c07312f7c38c17e7e7e4e61f633b50edbcfd9356a02bad667d3980c'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198001-198412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198001-198412.nc' 'SHA256' '8f4d66193bc34cc3032238522a3f0b6b60988151d8dea583dc2208ea4284971e'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200001-200412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200001-200412.nc' 'SHA256' 'f804e502d6423a8ef6ffc44d3015a2ca7d2ec09dba5faa6972bcf7c902ebcc6a'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_201001-201412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' 'a242a14220278df964a60884de7c240f081c05f99204ee9af417d0b5bdb77444'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186001-186412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186001-186412.nc' 'SHA256' '8a5314b05a57fe2c602cfea7e99676459e1ec3d2357ea736e1bc6ad445f24576'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189501-189912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189501-189912.nc' 'SHA256' '4452f925e7aa465650f981f9019103b22c988a5e9316bae55fcbfc690e2ab5a8'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197001-197412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197001-197412.nc' 'SHA256' '39f62169dd290f68e852ba42043fd62796155b5d54b09d213aea09c83d046f17'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197501-197912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197501-197912.nc' 'SHA256' '92f3461f7a5ea4f40b5819d5b8fa6cd760e5c629be360e790b629ac69a410b91'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200001-200412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200001-200412.nc' 'SHA256' 'aa802dfc4151c73be853026d3c5ed98e71eefa0b40c987326bd368467ee56ada'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196501-196912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196501-196912.nc' 'SHA256' '5c5ac0b08d92b587516b555fa9ae22c2c2dece2050723e85fc47355cd0540dc4'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197001-197412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197001-197412.nc' 'SHA256' '3ba8691f54338b7d62660f54eac58997afc4496a364ff24242fde4879b22ae15'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199501-199912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199501-199912.nc' 'SHA256' '6331c0c8d923700875ffc6aef6cb65c9e165dbaa96a330eab6b5e87436883c5c'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187501-187912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187501-187912.nc' 'SHA256' 'd44a7bc018d0369dd0b347703f07ee84fdc3bf22d86a9a186487ad00d5e7be65'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190501-190912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190501-190912.nc' 'SHA256' 'de3da30da023c53791ea86fc99eb493e080162b4a4d65323d53ad8776edc45c2'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198501-198912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198501-198912.nc' 'SHA256' '2f01ef2f3550b621fdbf7aa981a0cdaf3c003318993d86e0b67768c9e5bb0e6c'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185501-185912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185501-185912.nc' 'SHA256' '060c1d2b2de7edd97bd318a14d61bad66fd9aedb137bd9f56b374511e020974f'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188501-188912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188501-188912.nc' 'SHA256' '668880739a3cdc529bad6fb797ae7b8aff2d23d2cf61fcead1f2e0439c5f531d'
+'thetao_Omon_MRI-ESM2-0_historical_r1i1p1f1_gr_195001-201412.nc' 'https://g-52ba3.fd635.8443.data.globus.org/css03_data/CMIP6/CMIP/MRI/MRI-ESM2-0/historical/r1i1p1f1/Omon/thetao/gr/v20191205/thetao_Omon_MRI-ESM2-0_historical_r1i1p1f1_gr_195001-201412.nc' 'SHA256' '8a81d17256b0349f3ffe693611130d6d042cef5b6570b282aded5ddf833a8011'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191001-191412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191001-191412.nc' 'SHA256' '1e44a5bc0e5eacd4281b81e4643673ea9303ca1ebea8f63a12d73c2d629475ff'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198501-198912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198501-198912.nc' 'SHA256' 'e0aa98cf860033f9949d371e344b16e3534da0e0a88f59f9cb24513c1b1eba06'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199501-199912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199501-199912.nc' 'SHA256' 'c9747138e6d491243066eaf3cfedb1c6fe31b7ca3e354ca0c846ad923968e571'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185501-185912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185501-185912.nc' 'SHA256' '6547543aaabe7352d93dc437357ccfafaae988e58949144f2436f9cff0e71375'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188501-188912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188501-188912.nc' 'SHA256' '0b3b6251d549ad3de2ff8d997c54cf3213c45dfc8238f1d4c942c2ca3cbefd95'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193001-193412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193001-193412.nc' 'SHA256' '07c83ea8a1ed5f25f912df5e1c65771484ae09eac902cca3c4b5c63a9db43399'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199501-199912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199501-199912.nc' 'SHA256' 'cbb54404b9c9c376ac10d92f7e2c686e5f1d9120ccb27a277b3906b4758f19c2'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196001-196412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196001-196412.nc' 'SHA256' '5a57e6764fb86eeaf89a30b8c9901075aed8e5c7c3064262516db6d571cefb82'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186501-186912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186501-186912.nc' 'SHA256' '6c50c387ae0b05899efba3a7490f895aea8509f854205dc1766a4ad21accd7c4'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190001-190412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190001-190412.nc' 'SHA256' '40879b752c9dac7df24e9dabf7d6dcce79b2105f6a91abf4e78145f41557709e'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193501-193912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193501-193912.nc' 'SHA256' '4ba2d4f49453558d88bfb0063925bd699d3c51a16770f6c9dfa5055da9a8a210'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198001-198412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198001-198412.nc' 'SHA256' '8d01d28e9c57048afc5c0c6de38d6584d6c8d29cd0e66ca0e3627a11e2d72949'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192501-192912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192501-192912.nc' 'SHA256' '49105ac3631ed99bbb5f4562789f7912050bbd6be2f7a3147233deecb6d843f0'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197501-197912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197501-197912.nc' 'SHA256' '49f4efddec6e3473eeb4d03681fda53a545060e9f89bbc5ee82f47d348d60b9e'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199001-199412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199001-199412.nc' 'SHA256' '939020a549f157ef5225a4f206c2d7b4b16fc8769e5068e3a884c2cf8433867e'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197501-197912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197501-197912.nc' 'SHA256' 'f80ed3448608eac540e6f1b6a31dc14c75a1118f40a1326ca24bfe6d5bf78b36'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189501-189912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189501-189912.nc' 'SHA256' '9161a314943d2717e64bee7de1edd6f11fc0dd770218f9e967619d96cb7b15ea'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200501-200912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200501-200912.nc' 'SHA256' '60128b9a168a973f399a29726aa3e4f7d22360d4d97908af602697aa368e5b8f'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192501-192912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192501-192912.nc' 'SHA256' '0ab0c66dc62c8d975d96356ef76ba3e244129a3730336f38d677ccb2abb9d595'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195501-195912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195501-195912.nc' 'SHA256' '7edd1c879876fa6cce4f81871bbe4571ea04527cd4119949c3385c1fd27d6791'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199501-199912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199501-199912.nc' 'SHA256' '155d7b9ad62ca3e2219ed58c3556788a59341ec95c13057a0c1f9bb3701caf1a'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192001-192412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192001-192412.nc' 'SHA256' '5e359da45906004746fd13e5ff62ff9f87ef152ea126125789dc298112f68ef2'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194001-194412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194001-194412.nc' 'SHA256' '74c006a58915ba27bc0304e1e04d77c53075e1b250daa6489b91cef559f45b7b'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196501-196912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196501-196912.nc' 'SHA256' '2867316f20aee460c35b37ffbe8b4064f5025fbf3c2dfad42d46acc4824b4b01'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200501-200912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200501-200912.nc' 'SHA256' '9a972d15c22b325d4c1f96113a92ad4337fbe200d7c665443f4c7a5e8ef34c62'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190501-190912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190501-190912.nc' 'SHA256' '00e36afa99f7f7a4f2a0eec0f6b90615b52a310d9b622065b61730fc38088511'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196501-196912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196501-196912.nc' 'SHA256' '8c6b8db85f32fb9a769463f1cd6c4a5a8e8f09af384ca5e4c229c8631561f94d'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189501-189912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189501-189912.nc' 'SHA256' '30059d48dddfa58fde2085cb8181734d69178f94a5b67a206dcf75897d5f0333'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192501-192912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192501-192912.nc' 'SHA256' '9e6823d0b45a9948b307771caf564d12482b4722abddf48a3cb45dd644ced16e'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195501-195912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195501-195912.nc' 'SHA256' '40251e8b922c03f8cd424d488fd4c9baf2d720f279d6129b8075b29037a03182'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199501-199912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199501-199912.nc' 'SHA256' '41a3a42a9d6b9afb1749abb1c89e062089bb43bcc48c2d8ee6852b57460aa1ac'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200501-200912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200501-200912.nc' 'SHA256' 'c7d7b1980779678a19af53cf36d96f0ca18df5b1840bcf78ee2e092b40c83b8e'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195501-195912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195501-195912.nc' 'SHA256' 'bf7790e0a3d861a63cf527132b3f1c04ad30873434d9cf4d5d3b14373fa73aff'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200501-200912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200501-200912.nc' 'SHA256' '0700ff7d0546a0c1545d1e748670f15f9d8f44c226469c3cfa66d20c8facefde'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195501-195912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195501-195912.nc' 'SHA256' '5b8bc9822d2818207583fce33e71d682ab58dc137836a54f346790c7b3363ae5'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188001-188412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188001-188412.nc' 'SHA256' '3ae207b5e3f7b428d596783112bf0e91a82d5fa3904b588f871e9b24765b0b2c'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191501-191912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191501-191912.nc' 'SHA256' 'ac5a722e118741a17b6f32a1dcc88821c6ff73879b0800fe65a9fcdb8f8c9011'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194501-194912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194501-194912.nc' 'SHA256' '970e5d1485c1b6cd1f530730bc2076a36e03bd1292bd0d3fdf66e53cfb6fdc60'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197501-197912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197501-197912.nc' 'SHA256' '71a561959a116b6c9b63e4616d8d94dda7195ddaa877f95fc616130564c670db'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199001-199412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199001-199412.nc' 'SHA256' '32a78851ea0289b7cafc7150f32fa1c1bcd865160204cdab10a2b7ce3224a1ad'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189001-189412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189001-189412.nc' 'SHA256' 'b7412dd5991277b9dc2336fa661f9dc28f261c55580105bbcdf544a13a620c75'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197501-197912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197501-197912.nc' 'SHA256' '49faa89ed8908be7b12b7c0b57ad838dda39c9fb630568823f670f2f675efbc5'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196501-196912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196501-196912.nc' 'SHA256' 'c44f396ce0383218ba5c6c3a7b9590528a4090d2af32e7eb191b5ef69fd10bc2'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199001-199412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199001-199412.nc' 'SHA256' 'c757af7065f261f60148bc6426f05b1724dcd3a224a68f404ceecd853facfd5b'
+'zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199001-199912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/zos/gr/v20221112/zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199001-199912.nc' 'SHA256' 'b8491c89df8f8e2c8a1774027bcd11f93b79a07e9f2ea5a20f7cfab5a7eed1c8'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200501-200912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200501-200912.nc' 'SHA256' '754bc1ff6ff44035fe5b14862d73c443f68aedef827799af2a01618fc0c37bca'
+'tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188001-188912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauuo/gr/v20221112/tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188001-188912.nc' 'SHA256' 'f1437efeaa963145f47891cddf07b79d7944f2828c9556daa5898c6dbe9352b8'
+'tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189001-189912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauuo/gr/v20221112/tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189001-189912.nc' 'SHA256' '880cd100dd7587a5b781e36999574695d81cde1e966f6e1e5218869552befdfc'
+'tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195001-195912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauvo/gr/v20221112/tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195001-195912.nc' 'SHA256' 'cc3a7ce1a4f823f102b07b0b547925ca0f39b7e2ef4b9b3be743f70474b19d34'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197001-197412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197001-197412.nc' 'SHA256' '6e54721858b5a282b08a80fc2c7b5deba2f7fbe17ac0ecb52fb74c65fd105b4b'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199501-199912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199501-199912.nc' 'SHA256' 'c1e59226c8fb54e89d1ba5cff1968ba26838516cbe012db408a54041d83d1849'
+'tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186001-186912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tos/gr/v20221112/tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186001-186912.nc' 'SHA256' 'bbe7207fed7cce0d54e743de3438d225d3004efe14906659ec05b3da1209abe6'
+'tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192001-192912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tos/gr/v20221112/tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192001-192912.nc' 'SHA256' '26caada67bdd98229f36c0b8c7cb4d3c21fd0b0b5dfff8fb40a3482f6d4b498c'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187501-187912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187501-187912.nc' 'SHA256' 'e2b1fa2a31f7bbf41b83fd232b067b00f406f01458730df1e34a3508f21f0b2e'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190001-190412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190001-190412.nc' 'SHA256' '8d32bdc8dbea028497338f1cbe524e6487bd4669aa55ac99b854d8ec1501747e'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191501-191912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191501-191912.nc' 'SHA256' 'bfd386734c626a98a65a2e29d78ec753bf6f09f6db07ee78aafb5b5a8031429f'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192501-192912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192501-192912.nc' 'SHA256' '18f9bbabf28468825f7da50adb99b89c32e39d35512ec34a9e2f5fa41ff78501'
+'tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187001-187912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauuo/gr/v20221112/tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187001-187912.nc' 'SHA256' '74f73402939c87da29bf2655ab8299e88603ff4b59db59aa6790d91108428892'
+'tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190001-190912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauuo/gr/v20221112/tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190001-190912.nc' 'SHA256' '3b6e16e8d7c513c21c1de9063b870bd5ed1f34a1f4af1b1bd3fc8d6c38127b61'
+'tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193001-193912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauuo/gr/v20221112/tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193001-193912.nc' 'SHA256' 'b647a3eb10aebcb11b2614288f3dee6af313945c92fd55a9e30c0a737a9e5b57'
+'tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197001-197912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauuo/gr/v20221112/tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197001-197912.nc' 'SHA256' 'b24045b08c09267d36ccdc0f4cd281c6d4aee3e5a0a384650c07921629f1b10e'
+'tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190001-190912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauvo/gr/v20221112/tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190001-190912.nc' 'SHA256' 'ad63ad1f343f1e34acad61c61d3af5c2779981e5cb1ea273635bef4c6f1f0f49'
+'tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187001-187912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tos/gr/v20221112/tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187001-187912.nc' 'SHA256' 'de6396f2d3b743871de09e5ea4b35165d6b029872f0f648643d60702984d5fea'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189501-189912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189501-189912.nc' 'SHA256' 'df34d52b2c27b123046a5b9311709978be1b74a9ee2935f7daa84c7e465de7bc'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191501-191912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191501-191912.nc' 'SHA256' 'f81e21814f7d26a46f03014b74a1c85a1467c99a4ed4ce39c5847526663bdb92'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194001-194412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194001-194412.nc' 'SHA256' '0bfa257d378e53b60fd7ac609f523d71321324ce844dea82bbedc0e70d1a6cd4'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192001-192412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192001-192412.nc' 'SHA256' '911f3dfb2ed88fe104226cc7e05a8570cae1b837e2d1195b8b1e566c174b9c2d'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198001-198412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198001-198412.nc' 'SHA256' '5881d5711d5be1aa3089216bd656e01069d020ee328cde2bd798f223bf5dc461'
+'zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192001-192912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/zos/gr/v20221112/zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192001-192912.nc' 'SHA256' '4cd5660ad8a610b119f5ea4b069bca31471d5c1e094474c712a6e8ecf0ee7118'
+'zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194001-194912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/zos/gr/v20221112/zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194001-194912.nc' 'SHA256' '9f216ad04defbc72bf518a4c4d378f52d1b88401679bb9bdcacbcdd17fd0cddb'
+'zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197001-197912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/zos/gr/v20221112/zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197001-197912.nc' 'SHA256' 'b86c212e0c0716ac0295122efcf89d1ec10d091188bf007c916935668a223c72'
+'zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198001-198912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/zos/gr/v20221112/zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198001-198912.nc' 'SHA256' '0d3e75bf5426c0d0a25dbe24d3de45d31a22363872fc7ad00568d1f9974e8afb'
+'zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200001-200912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/zos/gr/v20221112/zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200001-200912.nc' 'SHA256' 'ac405f0b5e3c3a52a5d4bf97e53e48dcccbd6811d25191a8142c13e9165cfa21'
+'zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_201001-201412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/zos/gr/v20221112/zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' 'a9b7af3d0faf83b988e53399f7638e82614698be59a0b08c3caa257d1115963b'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191001-191412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191001-191412.nc' 'SHA256' '9d1e0febb015aaf13e2b485f0df05476ed0f5d14571a25682203ba1b5dd313b5'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185001-185412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185001-185412.nc' 'SHA256' 'b79b5917cdff8a336d3c5a61ea57e9e8120a454434891b3dc0e1912a4f6c95c8'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186501-186912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186501-186912.nc' 'SHA256' '2d5416a3b31e5bea91b6f5e0e070e5250bb39abc197c8bcdb57cd9e8d60b0509'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189001-189412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189001-189412.nc' 'SHA256' 'c9ee944ea1ba3d46cd143a99e53b1c80734e47dd48cd6f16689b1c4b5af34dab'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194501-194912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194501-194912.nc' 'SHA256' '161a6551b0b388129d53fa9bbc81e3696a5805921ce837f934de7cb907a670e3'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195001-195412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195001-195412.nc' 'SHA256' 'cff59ed05ba4b1527f9d6316079cf5d85f1e378b1cdf0d1a7250d6370aa78c13'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196001-196412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196001-196412.nc' 'SHA256' '4725b65fed3fd47aae0a88415077540b04008afa9dce76c8d4f9417593685e05'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186001-186412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186001-186412.nc' 'SHA256' 'a7d15a77deded6be3baa45f85488699d2a6a9140dbec1946e124967791dfbfdb'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194001-194412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194001-194412.nc' 'SHA256' 'e492082955c28a0c9d445630a6c2b4d52d2934e561fd11569ee9baf9d2f2d013'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198501-198912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198501-198912.nc' 'SHA256' 'f026919e1d503389075c80ce8835287a630bf21b9c10359a453c935480f6647b'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199501-199912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199501-199912.nc' 'SHA256' 'c773c671d2fff7e969264a324bf15154181d0f464ab631040825905f5d5b22d8'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185001-185412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185001-185412.nc' 'SHA256' '63620470bad609107f9dc35d4edf7f41a56214194ccc8e25f9aa826e35b7815a'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186501-186912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186501-186912.nc' 'SHA256' '1c0fa71443a3b362690eb92787bd594e512d5333018ae4ea2e973b302bba5d26'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195001-195412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195001-195412.nc' 'SHA256' 'ae1547095882f0e5d4af2fefbfbd5bee683f2024eb1f3a2ceb9d63f4222c128f'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197501-197912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197501-197912.nc' 'SHA256' '60086092a0633c0531b8ca0bc0f1dd0e25da5ff26269cd73866373d0e218bd7e'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189001-189412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189001-189412.nc' 'SHA256' 'a7f95378f4ec5ef4fdfe147498b3ccd090571e3884722601bf1de85686ec5571'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194501-194912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194501-194912.nc' 'SHA256' 'b09a4acf804d108751a7073778847fe1a08250a4c41ac47df4dc809c9268d345'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189001-189412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189001-189412.nc' 'SHA256' '721853045fad3a62d9e964964aab476a7e51a5d6794b06f2f837705178719715'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195501-195912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195501-195912.nc' 'SHA256' '332457ca60f235360a0f1a3cbf594dddeca294594af26b0552e496935d9d8630'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185501-185912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185501-185912.nc' 'SHA256' '1089efda208fca3259201f9258d146013158c61830db361fd856e4b2eaec8116'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186501-186912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186501-186912.nc' 'SHA256' 'ee946dd98fea00b942e0b66de200ec3740139e8d582f00f01727c2c7e989d55b'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190001-190412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190001-190412.nc' 'SHA256' '4fac52c4117e1da7b7a3179d9ac840ac664ac9a8833235eed5d916eaeb132e96'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200001-200412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200001-200412.nc' 'SHA256' '07c36e9dbb72ea24e894d981bb1d73653a5e3e13c7c9d1fce6ba8574b85b54d7'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188501-188912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188501-188912.nc' 'SHA256' '94ef2bbaf57d85523977bdba5ec68d7e462d5740e644c01d675404b1dbbf7901'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193001-193412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193001-193412.nc' 'SHA256' 'fbb64bb45e13d5ac15de83306d6c2cc46f67384d8860b5fd7ca679feac547b01'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187001-187412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187001-187412.nc' 'SHA256' '653ec89d4dde45fc92f849db0da0b50b18153f2bca8a383b12e0b66302259ba4'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187001-187412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187001-187412.nc' 'SHA256' '4583d3ad47b57cef8132e2325e7a697c3fe829db1e0a1443f54e4e0a1e4ade06'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187501-187912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187501-187912.nc' 'SHA256' '0aba5fea4b8e639a1305b2916ad1e8649927fa5b5f66e9761aeec0fd6daee12e'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190501-190912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190501-190912.nc' 'SHA256' '18fa3edf22b53743ed9ffcf46e48cbaa1c87b472da26605ebed6f3531d248c34'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195001-195412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195001-195412.nc' 'SHA256' '01e32ee116ac677a41664b722d0e8c70b4032e2d3c7fad6222cefd2035e0c325'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196001-196412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196001-196412.nc' 'SHA256' 'eac5ca4f3ed74bcf8d7f8f4961a408749f0fea8aa8e22d88993cddadf6188bf2'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199001-199412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199001-199412.nc' 'SHA256' '1e1a50ee17879d57f4d1dac91725a3091aba4a52e66bc7345f7ae7f9ef318b54'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195501-195912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195501-195912.nc' 'SHA256' '982425b983cbd9c1d827923e78502257f2dcdd3e7cb5379054d6e28c57dc82a3'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188001-188412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188001-188412.nc' 'SHA256' 'd67cabdbebbeebfb4daab2d4d7fe06022e175ba76a68c86076221bc14f7dd8ac'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191501-191912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191501-191912.nc' 'SHA256' 'ca71e55970bf56ee881201ba15a5a9162f3847864ce3e95a4428c30f9e3bd680'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196001-196412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196001-196412.nc' 'SHA256' '0b41ae288b9910982092ca5ef51210bba81782a7f4934ef96bfd415270a8ed9c'
+'so_Omon_MRI-ESM2-0_historical_r1i1p1f1_gr_195001-201412.nc' 'https://g-52ba3.fd635.8443.data.globus.org/css03_data/CMIP6/CMIP/MRI/MRI-ESM2-0/historical/r1i1p1f1/Omon/so/gr/v20191205/so_Omon_MRI-ESM2-0_historical_r1i1p1f1_gr_195001-201412.nc' 'SHA256' 'a62b6882653d6f687eb0dbc65cd63ad5d68caac0bc9de32ea911b67131ad943a'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190001-190412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190001-190412.nc' 'SHA256' '9a6161e12a72f8b364fad17689ca5321b677628465a675897468b6c9f93917ef'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190501-190912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190501-190912.nc' 'SHA256' '508f7323cf38607c5677ca5222cb6608513923741344e30a57f18eeb767cc5bb'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193001-193412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193001-193412.nc' 'SHA256' '3ec3f7f1bb47b26bf6475676f62b0cc71be9fdc9f8252f4acb159e6d22ff1205'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188501-188912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188501-188912.nc' 'SHA256' 'd3362c1bdd45b3e454e463fa87659442659fa7084e41344ff7699045b4737db9'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_201001-201412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' '9f73927ec59a20abb02bace6cb809369f74dc5a1ed2e0068b2ad707a605342f7'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187501-187912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187501-187912.nc' 'SHA256' '0b34ae555943eefcf5655b160706ba6cc5345607b50948a0ac7cad8ad4dd6656'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190501-190912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190501-190912.nc' 'SHA256' 'abf966ffeaae49662909a6ca9d819020608227daf2cbee7313e1c80a3da90430'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196501-196912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196501-196912.nc' 'SHA256' '9a30d27cc4d9059389a514640bb87ec3d5c5ed58bfcf23e74fb494d5b9279062'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200001-200412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200001-200412.nc' 'SHA256' 'fa40eba8c17f63beb22db6ac80109181a06ad213fa003ebfedad8023707988ab'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185001-185412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185001-185412.nc' 'SHA256' 'b9d7ee36ded8660e20645b02272242cd0d54d64461ca8c31be492dc739102e0d'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188501-188912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188501-188912.nc' 'SHA256' '743d1a550ab26e17c89ca28f2290b4029af1d3598c947d6029c851d43aa93a3c'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189501-189912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189501-189912.nc' 'SHA256' '687cfd11fb0a8caa650699eed6fa01de96045bb523f6b8ecd43cb953aff1bae4'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190001-190412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190001-190412.nc' 'SHA256' '2e3e9a4a9554e6f427664acbf4a03c013f1aad49a279e8d1b527d1aeac440aeb'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191501-191912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191501-191912.nc' 'SHA256' '506c993d70e6499d73a020c2d1977501b0ac223eca32dd45753b8a6f152ffa0d'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197001-197412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197001-197412.nc' 'SHA256' '92e6dd578ffc118c68e9d34ed96b283d768cd38a26d771235ccc1bedca8e3a8e'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199001-199412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199001-199412.nc' 'SHA256' 'cf06e831fcea0d9a4c3c6c7f1500716b70809753a69d7da97a5838fec02de50c'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186501-186912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186501-186912.nc' 'SHA256' 'fb655459901132c355a5fd97b187dbad17880b88c2d6e37d023071cb9f002fe4'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188001-188412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188001-188412.nc' 'SHA256' '201c5e5a4b38e8993310326960fb5ba6f32f6f8341f3bf6b569ab9270a3cdf98'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200001-200412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200001-200412.nc' 'SHA256' 'd878db2c42c0882d98c11ec7ce7c3cecf9eaaad3e369c2f4e036cf8143c89e45'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189001-189412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189001-189412.nc' 'SHA256' 'a3c0eb35322506abeafeda1d55cd030528741aec381489b210762aeeb34e735e'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192501-192912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192501-192912.nc' 'SHA256' '629cbd9c317c5c6d6bd5bb7dc2e240c503aae5251136a2f0eb5e3ba488843833'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197001-197412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197001-197412.nc' 'SHA256' 'f7b697c3d317fd4ec94a90be93fc94776dd81c0ac27f935e398c0b8b846c2799'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_201001-201412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' 'aa30c044e696cbcd4b51e7afd7cd99eed5942b4660bf6e0f2298762b5660415b'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189501-189912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189501-189912.nc' 'SHA256' 'c2839ac990761399f438c15f067c163103a86a278cad7dca748efa0a3cfa1bd2'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199001-199412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199001-199412.nc' 'SHA256' 'd620b95ae5014a9d6d1b0c35c5f34a1fc82958be2328e87e474720b680d4fa2e'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185001-185412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185001-185412.nc' 'SHA256' 'ce38081d4dc2feab8ac0f1abbe6e76149aeb8665a1c2ec5cdf89173ec75bde3c'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188001-188412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188001-188412.nc' 'SHA256' '94c972252ffd1ee00b3ce5335e10e5d4f55c0a5f887d64107e662375a999c3aa'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190001-190412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190001-190412.nc' 'SHA256' 'e31a0a133501d3ef94670d930770c146b149d3bd8acae17c6d524c3519a089ac'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193501-193912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193501-193912.nc' 'SHA256' 'e8a42c3375f3b682adb35899ae298ecb84a0939f76d4a53b995851a71cbc9833'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_201001-201412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' 'd0618158a1be5b47af53a8ea41c97d1f480aec07d71d0e205da45eaf61ebf812'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187501-187912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187501-187912.nc' 'SHA256' '3688b25e8770ca3fb4862b6307942d3cd08a0078af209e254ae6c355c493d4db'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191001-191412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191001-191412.nc' 'SHA256' '71c92af5621473bcc763664a7c79609a1459e2675ec5eaf2ab2f0f1d4e569215'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193001-193412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193001-193412.nc' 'SHA256' '900509cd5943b123f8af421bbec232146365e837aafa9211862a32459fd8eed7'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199001-199412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199001-199412.nc' 'SHA256' 'a66a778e2566dc3a7fb2c560786b85ea86657a7207417a5b62aa633a9fea4240'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189501-189912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189501-189912.nc' 'SHA256' '6daa655d97c3f336643c490a90ae56425d94fbe32c149e7a01c293bdd4c3ce2f'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190001-190412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190001-190412.nc' 'SHA256' 'b346ad1cc3dbf02ddf5412500865dfefc672048c9b18d6adb93480448f856181'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196001-196412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196001-196412.nc' 'SHA256' '79f032e0aa59fd7c5d0f744e51223201c613738a2933127786fa9b5966562c38'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200001-200412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200001-200412.nc' 'SHA256' 'd25675220b9a1e0fae98f76917970887af7a3b61aa3ac84ce8d0fde06fb18920'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185501-185912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185501-185912.nc' 'SHA256' '1407274482122eb863ee643b08b484e198243823c165a30b88d5a1bb0de58c94'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186001-186412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186001-186412.nc' 'SHA256' '0b49e755f6f4a2de2d5b9527838d1efec964aa3648849bd4a32104736e7592a7'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187001-187412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187001-187412.nc' 'SHA256' '9613fa13472a9a90f70fdade7570fe7ca3388452ac5e369bc73abea8aed574ac'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192501-192912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192501-192912.nc' 'SHA256' 'eaf7e35a56c153ceefe68490e8a432b89562441df12d2a53a048a51dfa2ce982'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194501-194912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194501-194912.nc' 'SHA256' '60580878a3a1711a2184e7719e4f7c13acc6f19d650216576964151c5d4afebd'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199501-199912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199501-199912.nc' 'SHA256' '20acb1127eaa292e4a29841abe8477fe3fb7e6112286f0023a3b4aeeb037cb21'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186001-186412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186001-186412.nc' 'SHA256' '05eff148840c97f9d616b7755da915f69e87159d53f7332978644b633fce0ae2'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187501-187912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187501-187912.nc' 'SHA256' 'dfa7711d2a0574c38aac8ee2fa4e5196929612af26067a01ec181d13893fe754'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200501-200912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200501-200912.nc' 'SHA256' 'd02a698da7e168dd3edbc3fcdf199d14a96b44b6216a36b5f2a9b37604c8b02c'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196001-196412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196001-196412.nc' 'SHA256' '8892949cad1c0b9ff568f6a58c12c078bca5050ef77b0e30595844d998f43d6f'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196501-196912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196501-196912.nc' 'SHA256' 'b62d0b565a81d0a4d2dd67267e0db5a9839ef3341e410a3699378c3e1288909b'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197001-197412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197001-197412.nc' 'SHA256' '3f679c8c607f830e5fff804b28feb82f3c727140f344778e8a982bcdc69ab1f0'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194001-194412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194001-194412.nc' 'SHA256' '78136173d686b3bff708a934fa01c0630d293ea6dfe8fd81134613d137a2dcab'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196001-196412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196001-196412.nc' 'SHA256' '84021e1a356b7ae22eda995677ff487ca571eb08b595fc6f4d9be3ee6b92896b'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196501-196912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196501-196912.nc' 'SHA256' '1c2a0351b32fbfad361e2aaf17c2af9ae15d1ee572833ac89c82047ed98a06d9'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197501-197912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197501-197912.nc' 'SHA256' '33d2e292d8fe5e38bc3d5f001170fb322fdf197e83101c4a1c1e87b3e6ecc7da'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198001-198412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198001-198412.nc' 'SHA256' '9f3f784ed556ba371d94134caafcb5b4d07c53e05e0c2485fb0a2c629753778a'
+'tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191001-191912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauvo/gr/v20221112/tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191001-191912.nc' 'SHA256' '1ae9edbd6a8c405aa19031ce9fcc90426418a34640cc12102d3aeb11dcaece7b'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190501-190912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190501-190912.nc' 'SHA256' 'e5cedb3a793c437173d2bd38eab148d2b9b0b3a01ab8ac1f96849b5998cee7d2'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194001-194412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194001-194412.nc' 'SHA256' '1a4c25486887acc0401363f48c5a497fb167dc405b502d76bb9fe33cc1901581'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194501-194912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194501-194912.nc' 'SHA256' '1af1e186f04109276d9f965651bbf062a4985e81df81d3b8ed44fa94dbdfd0cf'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185001-185412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185001-185412.nc' 'SHA256' 'b8ab0f434ef8b6a3e6c347fcf1c0887d58a1d69f3a2d93912deb40881595080e'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190001-190412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190001-190412.nc' 'SHA256' '4581d7dc92582175637fbfb30a6ccd0f0b54cbd80603c097f3a14bf96d90a4a6'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192001-192412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192001-192412.nc' 'SHA256' 'edcb0a214123578f9866a9310e9fa8d78f85b41f19f0f1e63fe2000b5860198f'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197501-197912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197501-197912.nc' 'SHA256' '22d845533a1240c960dc45d4d5b5d5660c3cdf1b6fcb9afd57732dd0e77935e4'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188501-188912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188501-188912.nc' 'SHA256' '63b932f9f1153fd57287a21a7b5b1de4978b3b8c5db2cc129b254dab12b28609'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192501-192912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192501-192912.nc' 'SHA256' 'fbdc1ccfecf31143c8f76c68a75d38ec56d7437030eca77cd508b7d6bd029b7c'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193501-193912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193501-193912.nc' 'SHA256' '64ba8a271f5f5330bb36210e1b5ef9abe870d9bc1df2f20e305b181d2165fedb'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194001-194412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194001-194412.nc' 'SHA256' '586f16e44ece5196dd279bb2f3b4978845ec099fc2427ac7a659a5821a4f2be8'
+'zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185001-185912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/zos/gr/v20221112/zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185001-185912.nc' 'SHA256' 'b4eabfa3956f162263b0ffa66b7b942b05462a185b697ebe634c527619d0e470'
+'zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190001-190912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/zos/gr/v20221112/zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190001-190912.nc' 'SHA256' '19ecd73a9835be0d519d27e7461b44c8c448673f9db4fcf60218cacc7aa3a996'
+'thetao_Omon_MRI-ESM2-0_historical_r1i1p1f1_gr_190001-194912.nc' 'https://g-52ba3.fd635.8443.data.globus.org/css03_data/CMIP6/CMIP/MRI/MRI-ESM2-0/historical/r1i1p1f1/Omon/thetao/gr/v20191205/thetao_Omon_MRI-ESM2-0_historical_r1i1p1f1_gr_190001-194912.nc' 'SHA256' '95094c1aaf972ea91ac2cd3e3be6faf90820c3b3bd50e12fed985a421e1828be'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185501-185912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185501-185912.nc' 'SHA256' '4cc8a8fdffa796b5f0ff5b5c95d80f63660691b103b59b4be03a2c2549a4a9b6'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186501-186912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186501-186912.nc' 'SHA256' 'a33c6904699c5083a985730b07a86203d6aa9018c6ecb4fc76e930bca896f1e6'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188501-188912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188501-188912.nc' 'SHA256' 'f61563b9cd75f7248b8c2c70723785492fcc8deef1a36953e11d1f1bfdc008e9'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189001-189412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189001-189412.nc' 'SHA256' '745891157b8d1c0a890afda1427562078580320c885686b93154970284f8bb85'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192501-192912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192501-192912.nc' 'SHA256' 'eba11ab505ccec0d35b86c04d38977bf87be71b7a3322205d714dad07019d0de'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188001-188412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188001-188412.nc' 'SHA256' 'fd90e9333434d067040b3cd1b061a31f3aaeb3b9e3db9ed2812e95b2f79d3432'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190501-190912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190501-190912.nc' 'SHA256' 'd6b95a47a83f35623c0884f25269063f33f4353e85bbe0437f38e9c3803a7e8f'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188001-188412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188001-188412.nc' 'SHA256' '4999722d6ae3be2501b996705881b0ccb430f55c6c99e648a6a0676d7083c9b8'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196501-196912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196501-196912.nc' 'SHA256' '097fee54cba3245a22767d4f4bdfad5498b8aeeacdb8da7d199446ec1377da80'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198001-198412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198001-198412.nc' 'SHA256' 'd6920db45391b14a3691ccca9f3613d537ae9a310092607501718cf8ebbfc4cb'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190001-190412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190001-190412.nc' 'SHA256' '25609d6f0505cfac09f3e03b138f4eec20636bcc0289cb04f7e29a3bd3126c84'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196001-196412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196001-196412.nc' 'SHA256' 'c4cea10453b5cfd8c13c38d822bee37fb4f976b5ae1db3cfe056109be4806d75'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199501-199912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199501-199912.nc' 'SHA256' 'cfca4d5c4f970eb69c93fc75d8387828f28ddf4628188d0f505d296501fb9344'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195501-195912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195501-195912.nc' 'SHA256' 'f2895391803f09f8d10841f8c86d74f6e64ddf38afb29b93a312b2725f3e43f5'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_201001-201412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' '251d75526814f06726e35b84c71845bacba632123b960f73cac6697381ebeea8'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193001-193412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193001-193412.nc' 'SHA256' 'e0648d8721f04b68e1e4e37abaf1d60a5ccd3826dbee9e3076fb881159d381fc'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_201001-201412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' '48412738581f1d0b0eb2d21b719659a038c944276902dff0cc486e0b0f3f5bb6'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192001-192412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192001-192412.nc' 'SHA256' 'ba36f3e9fb304064febe6e5cde1621734f73f4429415b0ca9e5321890f6265f8'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189001-189412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189001-189412.nc' 'SHA256' 'cf9be87a151323ed321a8d8634a9e816aa92cc1d4ebdde5e1987acc255fc38b5'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189501-189912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189501-189912.nc' 'SHA256' '44a888fc955e5d809fcda2b79d5d0b90680294b36d55fe1fd5108946cb4d926f'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190501-190912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190501-190912.nc' 'SHA256' '1b70ad143d4e5b7a617fb7722aa3fe83cacffffa6becfa8394c06a8ed32c5450'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198501-198912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198501-198912.nc' 'SHA256' '00b761efd5076bd0f5da1d3dd4851183cf10a58b6df1dd5ec96e55c853a2b176'
+'tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186001-186912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauvo/gr/v20221112/tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186001-186912.nc' 'SHA256' '89a905971631a4951495169ca044bf41d526a650af461d7e276616b3a2d635ed'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190001-190412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190001-190412.nc' 'SHA256' '9c4cc521ee33b1b12a22e1a0b212f70d9909f610715e47c184e447cb75117482'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195001-195412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195001-195412.nc' 'SHA256' 'e45dbf2bed429e39b7ae639ae2ceef234f9e115e8444034c1ffa5c806f29ef44'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198501-198912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198501-198912.nc' 'SHA256' '8f69f485acdc10d53d445cd94f1f81d37a727f1cbb08991c6a9fdd37a31ff9f6'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187001-187412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187001-187412.nc' 'SHA256' '3db3a66cc869ceba41f2c088e780c876ca39a1dfe5fb0b00a72b98bcf308083c'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193501-193912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193501-193912.nc' 'SHA256' '12d3713a421ee3921f20d710546b6899010afb9fd50a7830c3d917bdde7d2d1c'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197001-197412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197001-197412.nc' 'SHA256' '99e570830b376c66227cbb57c1f30e61d86fe7a5e1dbace5c2df8449d4a37471'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185501-185912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185501-185912.nc' 'SHA256' 'a5be02d011e1e070b227e62764be6383187a12e87af44660f9a63dc6e344861d'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189501-189912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189501-189912.nc' 'SHA256' '71ec3addb68bf59161b55e63b3158105fcf551263e4c2c02830d5f329764ffbd'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190501-190912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190501-190912.nc' 'SHA256' '0457e7842fc526c8274d32cd2c225ea46c57f74a77dbba443978f47e434f4926'
+'zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196001-196912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/zos/gr/v20221112/zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196001-196912.nc' 'SHA256' 'e5da1fdf2d0718bf413acab81edac941d3556f30543fcecc3a91dbad874ecd8d'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192001-192412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192001-192412.nc' 'SHA256' '58a5eef62d1900273616b29b00435d5ed85026d97293a2d1a4babd13e44109af'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194001-194412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194001-194412.nc' 'SHA256' '2322e296ec4e3bcb32f5acb699ff86e5abc5577e09e49ee15069c3dfb21c413a'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185001-185412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185001-185412.nc' 'SHA256' 'b9f1af92fb2ed0870d4adc9ec5f26efd438a88c24290cbac176f95fd6e5a95a8'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186001-186412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186001-186412.nc' 'SHA256' '7e42ca2f7049268866b7843357d9ed8901ff7911b44e92f512bab56f4096cf54'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190001-190412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190001-190412.nc' 'SHA256' '10720d4da0bc19ea718a94b16768e78f5bc3431cb723f81273b7283f35bb2346'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194501-194912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194501-194912.nc' 'SHA256' '09b82ad845debdc929e6b6caeafdfa83caae2a1e8cb2eea546576e6b7b76b62d'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191001-191412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191001-191412.nc' 'SHA256' '7cd674e9f91197c76d25618c42487f02d1cc8eb4dcffc1f2c5861b9c97d2d000'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194501-194912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194501-194912.nc' 'SHA256' 'f64ee73c3310ed38adaa00416fc5c78e7c2a0bf3800c0fd626d91b65f8da972d'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_201001-201412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' '161a6b98a4d9c8d66610075d7d59129ca4b71a077165ea119f6c8a88c1ca2985'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199501-199912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199501-199912.nc' 'SHA256' 'a8d259cae7b8be0839a1243a2aba8c62159dab25399c75cb30362ddc801d7d58'
+'tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194001-194912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauvo/gr/v20221112/tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194001-194912.nc' 'SHA256' '2b38c90271d7122ad9915de8346d09337391b88435e0141aee7d403f703375af'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192001-192412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192001-192412.nc' 'SHA256' '59c7f2aa548822f95d7ebabd00ce15448be6ec77324fd527d8ba1adf5e4379f6'
+'tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194001-194912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tos/gr/v20221112/tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194001-194912.nc' 'SHA256' '291bd73edeae5c09120080ad5d313b8ce41af2b347e44b94e3f5b2af49ede365'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192501-192912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192501-192912.nc' 'SHA256' '1363d623d24c67cb540a3288f8b82d4ff6a50743bad99695b5ae7b015bb623b1'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190001-190412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190001-190412.nc' 'SHA256' '6d6568593dd0e573994ea6e6be54705c3350ad24134546dd0c0a7f088091f973'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191501-191912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191501-191912.nc' 'SHA256' '1161019e50c2c40d9727ddf43a7173c330b01ba730051caaf2eb7c08c11c0572'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_201001-201412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' 'cbc0c57d89b5e195d6d06ebfae8aaffbf611a59361742166371a8d8529e9c948'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189501-189912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189501-189912.nc' 'SHA256' 'd85ab4f7706452c49d4689ce894a035f562ef52c3af5e53d85c2483ce8fcd907'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190001-190412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190001-190412.nc' 'SHA256' '45c3158a2a4fc59171bada76081e0a7cf49073d680d591b0890013cd21aecaf0'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200501-200912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200501-200912.nc' 'SHA256' '59e9239a6d9e2749d40578682d486975ed0afbdcc9e50d9e8c757efb4410e5ee'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192501-192912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192501-192912.nc' 'SHA256' '1ab5ab3c8dfaef0f47a2952bcfc7661e68334349b091b4954e1b370f12b76f17'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194001-194412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194001-194412.nc' 'SHA256' '8d75bb457a8d8b30007246361609dd5975402e41b03b4e73bd10270da35c0b25'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196501-196912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196501-196912.nc' 'SHA256' 'e5e66a4f59d63c47031855884e5a60b528c2e95ceadbb1f592211e6c62d98790'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185001-185412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185001-185412.nc' 'SHA256' '43a1b61f1206f226207f5a6bc14cd5d60d706b8e8f18e77136672965b9bada09'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186001-186412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186001-186412.nc' 'SHA256' 'b4d0c14c10e70d21f73d633784cc70568efc96ff5b64075a405fb5f335864d05'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186501-186912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186501-186912.nc' 'SHA256' 'bc164cc2fcf837381f45fed0857bae86faf65924f4b335406ebf825c73e8e591'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198001-198412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198001-198412.nc' 'SHA256' '7626d87c1ceed95d5ad539be6324ada16921b458c6c48e89a4b4b6eaf646c7eb'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_201001-201412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' '563287ddb2b91eb74b004c1c6fdcc1546fc393750dfb05ad0fcae0e22ad31645'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185001-185412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185001-185412.nc' 'SHA256' '8464dbcea5f7e551426b0590709e9f53dc07a0668f08d4cb298a7a5ed959f688'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197501-197912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197501-197912.nc' 'SHA256' 'e67a5aae3f43b10f700a181a73586b7b89fa3c8f16ccfe918cdb894a862c5a2c'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198001-198412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198001-198412.nc' 'SHA256' 'd42642b8fba3bed04f50d125db029f98308ee136db5b2e7c73a8ef55fc1c4a61'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187501-187912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187501-187912.nc' 'SHA256' 'e7c3625180144c9a3c3f0278776507d0a4636427f2fc943ec7d99d5e5dc84477'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193501-193912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193501-193912.nc' 'SHA256' '684d5874cb46809623d6359377ef184e9f769ac0ea1e51a5db3382259d818140'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189501-189912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189501-189912.nc' 'SHA256' 'fa6d90eb8dd8e1d4f97d1bff0559156bf3dfb70d10d3b6db151a2c07b657f690'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197001-197412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197001-197412.nc' 'SHA256' '1532631aef0ec456af0e6e1b8686d00f8762944e897ed40111acb69e25607b60'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185501-185912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185501-185912.nc' 'SHA256' '6eb45693dfe707c4764d6a97c0731bd94a445beed2ddbf27a89f044ccb2a0b94'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189501-189912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189501-189912.nc' 'SHA256' '11a3676e381b42f78c22b97f85904dcaf91d7c0e273a4f76d457b8bac7761b9c'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196001-196412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196001-196412.nc' 'SHA256' 'be06a972f8064351810f9789e9edacf82f1916f90d82d5a2f8bcb4f318ce6e9b'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197001-197412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197001-197412.nc' 'SHA256' '47fe0246ff1a45e418d4b7faf98ffff7a133094a9c68222e2d96a6a8987ee06b'
+'tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192001-192912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauvo/gr/v20221112/tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192001-192912.nc' 'SHA256' '67044d723be76cc616357188807b6aa968a057bd3ad1bc19bfbd85271b37c2df'
+'tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199001-199912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauvo/gr/v20221112/tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199001-199912.nc' 'SHA256' '906c13d08518f448b0263e72f4dad9027b4801b7f71f464e5fad7326ffedd381'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200501-200912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200501-200912.nc' 'SHA256' 'cbf7c63fd81ebcb3355e68c6ee21d156b2152d9d4faf515374efa9f4a6f50b2c'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189001-189412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189001-189412.nc' 'SHA256' 'f64303f355ad254e696b50daf5a623055060dbf0716f9dac92b4d51c133e3c23'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195001-195412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195001-195412.nc' 'SHA256' '2eab0473169f28313f612d8cb40cd708557cb5582234a14b8b9d447d7ee5ddcf'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195501-195912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195501-195912.nc' 'SHA256' 'bef8965b663cfe2e790abccb62075a1866ec813ed84a486c1df78129133851a3'
+'zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189001-189912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/zos/gr/v20221112/zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189001-189912.nc' 'SHA256' 'fcdc44a3c772e71bbb6a060fa350928dfa214024355d1de60c7ae0389b8407e9'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187001-187412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187001-187412.nc' 'SHA256' '39a22023c4ddf7acdfb62793ef8e01dc60921b221fea01973024e8b2f73eed6f'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191501-191912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191501-191912.nc' 'SHA256' '5365e256ac586109357bc3952d85df31ceec0ebd23968a96f9c61d12bd3a666c'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198501-198912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198501-198912.nc' 'SHA256' '7223f7679e93211fa10dd32dc62bce4934476caff6af686c31b62feb97a452b0'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194001-194412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194001-194412.nc' 'SHA256' '0325089bd42a9b7b6ebc1c04187d41c7fecc7d112c1e385707518b57feec6a50'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191001-191412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191001-191412.nc' 'SHA256' 'a66dd689c5a4552b9ccfb353e9db9cbb6e7155b17d8e529e273c95a74aac47ff'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199501-199912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199501-199912.nc' 'SHA256' '775296f074ecd60a40d372db767a535bc6de2e6c9a85d5eb83c22c211c3e0d15'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189001-189412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189001-189412.nc' 'SHA256' '474072a80b415488507373d5b6a534f08ae2b970e9be6686543cf38ac70020be'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200501-200912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_200501-200912.nc' 'SHA256' '141752351c6a222a54e2b721dad6ec4a2d53452fa21d4035d9e341284c3b39c7'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198501-198912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198501-198912.nc' 'SHA256' 'fe8e63b363ecffacb7bf180747dc3589112e2f11a2b12e8dc2d066255daa972d'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199501-199912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199501-199912.nc' 'SHA256' 'a79fdc816b13e4e0784eee5f2282b84035869d721772049fbc2320e869bc706a'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189001-189412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189001-189412.nc' 'SHA256' 'd5cb8c1e34157a0220e0fe789371eddef3ebe912b209fb1e270b4f9b81f172c5'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189501-189912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189501-189912.nc' 'SHA256' 'dd5251a6ff298cb7758797e15888a19250b253f1c00e8f4a7c99e6ff34caf7b1'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195501-195912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195501-195912.nc' 'SHA256' 'd7757bf82bceb86299bbc3b3607c5681effe2785681a03b7f335a1c4b68cc627'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193001-193412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193001-193412.nc' 'SHA256' '3a5b94a71745f0e51819f9766130075317ff642fee42f410bff94d9ee37aba72'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197001-197412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197001-197412.nc' 'SHA256' 'c5d4beb9a2cb5f2fbcf5873acdf4b43f3b8c91f0ba8bcfd64a13c882ec10e3f5'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186001-186412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186001-186412.nc' 'SHA256' '0414f6ed6de679f21f8a7845e24119caa9c892d88973474577720e10e85ae98e'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200001-200412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200001-200412.nc' 'SHA256' '891050fc44370ff6c9316a4c85a60fc9fbd51a605503131594ddf76a13c8de15'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187501-187912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187501-187912.nc' 'SHA256' 'e7d18df781dddd922ed0311074273fd2aa7be52aa7e6b90860896a2f80272fa0'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193001-193412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193001-193412.nc' 'SHA256' '274a61defa0be5b042859e88f60f0eacbaf8587c72fda38daf9dbb4c6bc3a746'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197001-197412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197001-197412.nc' 'SHA256' '445f4cdecf90cdd8043389e91ae852191b054c53278c05988cc2733e4eabed1d'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198501-198912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198501-198912.nc' 'SHA256' 'ad53ebc772fab1e8c411625d432fba0f652b7bfe8d555d3fe065803829fe6eb4'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185001-185412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185001-185412.nc' 'SHA256' '2a92ca6d437812ed781c0ffc084c0a8e8dfb1a41fcde955875485c68b15f5f01'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195001-195412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195001-195412.nc' 'SHA256' 'b61fe07c9b5ac57a0e14413b34ca52303cafb96a1ac67e4a2f90a47406d50b40'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195501-195912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195501-195912.nc' 'SHA256' '9747449b6bc6dd31f2a490fdbf7f2a5b49b1e52fc08053714b7d443a1fa3139f'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198001-198412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198001-198412.nc' 'SHA256' 'a04730aa17ee7a5c388a97cd89563949d7d733db171178b0fc6fe8b252557152'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199501-199912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199501-199912.nc' 'SHA256' '772a2c490d9bb195d7513204579c339cd9a4f2939bdd121581ce652f0c6277e9'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200001-200412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200001-200412.nc' 'SHA256' '1d44be0ba0fa76d22f28956b774fc98fd0565e447434d01611ce897c94287984'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191501-191912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191501-191912.nc' 'SHA256' 'cecba572933c71bfb9f5944ba625f706efade01b8f431f53491c2282b4dcd4d4'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200001-200412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200001-200412.nc' 'SHA256' 'db93c48c9675bf31b83d3298e3ada54c46b4dd263cce60c440f5315f453c61d9'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186501-186912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186501-186912.nc' 'SHA256' '697d5838f056448ff483cd251f4bef9d213feb711e12ff7af92b26181714e5c3'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193001-193412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193001-193412.nc' 'SHA256' '3a21f39a4a0650204efd276bd615de84acbc2ac5fc64abb49103fe7fa49e7f0f'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199001-199412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199001-199412.nc' 'SHA256' '144721fb5f999384d5a216b3abc67e5c858a361dc13fb4cdb51d9728afecc3be'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200001-200412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200001-200412.nc' 'SHA256' '96d688429ec4977d000fd1f50e9ada7a2630a2f9498ae7e64727953c7462d727'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_201001-201412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' '5d1b70b962f51a792b2cc1be7a80666749d9841a89ce31fd2dea2b289ad7c9b8'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192001-192412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192001-192412.nc' 'SHA256' '5cbe481edbf811b99a3db9e1f7be2ceef15d731d645144be8a38ba0a82968dc5'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196001-196412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196001-196412.nc' 'SHA256' 'c502d318af8e803a681b66b604c282818672784cd178e9f517619c2790c10e89'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193501-193912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193501-193912.nc' 'SHA256' '1338675d8a970b43a8a77892435f1c7258b2ff75af9e6c39bd3a6ce6b96d230a'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195001-195412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195001-195412.nc' 'SHA256' '3aa863ebc10646ba559e5cece3ec2f247609047e98e6bb77d34898819165e7a9'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196501-196912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196501-196912.nc' 'SHA256' '973b3b116e3756c92672c50244e7c0ead06ca0b07190281686b950890a2a402f'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185001-185412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185001-185412.nc' 'SHA256' '10f7d64af39016d128df4178b132d3fa23c15b770826e01cd1cc6bce05ae9535'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188001-188412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188001-188412.nc' 'SHA256' 'a77186c68e032e7aeb1a38b6697d7ce6b8001a65cf394d46f43833064f004b5f'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196001-196412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196001-196412.nc' 'SHA256' '6751db95d7d0a2891dfcac119e6cfb60650a20e6768053ded786deaf6964fc15'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192001-192412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192001-192412.nc' 'SHA256' '754a968209669be0cd2563743db2292924024470d3e4847a1f4c20bfcca01c09'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193501-193912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193501-193912.nc' 'SHA256' 'e0454cfebf499a13d804a6fcdc7f8e448d9c4bc348802b0b71c32c6847818fbb'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189001-189412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189001-189412.nc' 'SHA256' 'e323c7bea6d0d6ec843d972c4f8754d2a1d92ffb28428cc8391e5a415069d9ff'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192001-192412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192001-192412.nc' 'SHA256' 'c9b29281a12fb467143219776ec54dcdec10ba8104fe3c1af3c68a027372ca6a'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194501-194912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194501-194912.nc' 'SHA256' 'd9a07fecaaa5749ce93f609ff6f93d2624071f58b5ffc95a16d6a81996784114'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189001-189412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189001-189412.nc' 'SHA256' 'b82e1cd6d500ce6a1ba503ed3c87d91127d9aaa2731f0103724e8df8505ff4ff'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197001-197412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197001-197412.nc' 'SHA256' 'dbdd54eebad39ce98ce7ba6f3dfd5588e906fe3fd734affeacec8af2160592d9'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199501-199912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199501-199912.nc' 'SHA256' 'ae7a6433ab90c2bac2001269906f5671f0877d0fd5ebc021e43abb1cf44f5905'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186001-186412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186001-186412.nc' 'SHA256' '1caf3b26629cb9513d74ae40bc7774737eeb45aeee96fda2f2a73e923c936f89'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186501-186912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186501-186912.nc' 'SHA256' '2f83420c08d0b15e5975b59cc756559c38c4a79005f291f1997b1eb6cc46938c'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193501-193912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_193501-193912.nc' 'SHA256' 'e8ab8852bd15e9e117a268d68bea182c4ea2080bed5a34178e930c3cf4e5ee59'
+'tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192001-192912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauuo/gr/v20221112/tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_192001-192912.nc' 'SHA256' '720495f6f1f58175861dc4b24225d803e5e736a0707afd6ce97bed722588a2f5'
+'tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196001-196912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauuo/gr/v20221112/tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196001-196912.nc' 'SHA256' '4afbb9e49700f55617b80b2f74a5e75e5fc6752be28b9417f024ae1e67deca30'
+'tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198001-198912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauuo/gr/v20221112/tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198001-198912.nc' 'SHA256' 'ffdc90ec14c8dda015385dd5a49cbf1b2a23e31574642613912c4a43ce00593d'
+'tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200001-200912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauvo/gr/v20221112/tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200001-200912.nc' 'SHA256' '4e8deba3d4cb59d757a80e92dd9a0729a729b51988e0cd6981fe562de3f299da'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188001-188412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188001-188412.nc' 'SHA256' '1f71c713b2d512f9443fa14073bcf073afa37c8a00a52ff72f29e131a8cc6a86'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199001-199412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199001-199412.nc' 'SHA256' '8218d17f3f7aa4cfada230d8e18cb08b5b59a8ebb6ff14858423b25192724d83'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185501-185912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185501-185912.nc' 'SHA256' '5d88de891c5e6df13e68d78d6b94f8f46ffdbcc9e98ce43fde69a6a1ce9a518c'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186001-186412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186001-186412.nc' 'SHA256' '5f5108af03e59ad4cdfd0afb6382feea53bc4f8fbe41b77a57dbfec5c5a5200c'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196001-196412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196001-196412.nc' 'SHA256' '36d4913b1f572e5d1008567806becc3dc32f0355d803391f0b00bc20bb9bed55'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200001-200412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200001-200412.nc' 'SHA256' '8f13425fb17322d545f8296cb2595356125b7221d080a5367f18d1ed89dc0345'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197001-197412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197001-197412.nc' 'SHA256' '53ebd6c406addf3726b4e265bf2e5406a38f7fa12470e4050780ca78dfe63b28'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195501-195912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195501-195912.nc' 'SHA256' 'bf465fb262a1d81aea3dc00bf2d3fc80d0300bf264e7cdd92dd7664bb03b6505'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194001-194412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194001-194412.nc' 'SHA256' '55f4ac66973a9a44872e80d0652bda3bb76d4461dbf020e42de719114f8b762b'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193001-193412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193001-193412.nc' 'SHA256' '26079934dee32abf2ef730b0db2ed30bc21583bab48618b624a710f6384facf9'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194001-194412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194001-194412.nc' 'SHA256' '3c039a2e22bb37e43fbc6fbdfc62d0b541a63aa12dc7c466abbcfb83abe12ff3'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197001-197412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197001-197412.nc' 'SHA256' 'a0d53388404a537575a7d63b9d9503eee68eef4a4e3e57ae1983e88d403ca432'
+'thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186001-186412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/thetao/gr/v20190826/thetao_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186001-186412.nc' 'SHA256' '75a1b40651bbd23728c11a9294ac211c27fc97a37e206b483897af8219c0d1b0'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192001-192412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192001-192412.nc' 'SHA256' '96791a7a0b0eca41908b7130ee70155c88068796746f7919522ca86d1d093745'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194001-194412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194001-194412.nc' 'SHA256' '05d82d9729fd64e27c36a66df2aa94aaca553a7a172de9c9faca258d1dbed70c'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186501-186912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186501-186912.nc' 'SHA256' '7a9fa2cf3cbfb8966aaeeff0683e08afc987947da2c9f6a493a357db6165a1c9'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187001-187412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_187001-187412.nc' 'SHA256' '1d43f088e52a8b324c28956c5c77fa8327cce099068ec607ebb4d135181180be'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192501-192912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_192501-192912.nc' 'SHA256' '9d28f227acd0b747e3084e9ebe9aa27e54c8adb7e45b9090df28f9dc5ae95b4e'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193001-193412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193001-193412.nc' 'SHA256' 'efcaf59e912fa8f66c293a362425b8e90e29d4141db41e8e80bf6fa5e203eaf2'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197001-197412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197001-197412.nc' 'SHA256' 'cbd68c35f97c4a681725b06a4fa12bffe6539b36b0935d89eacf35a62d0ff865'
+'zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198501-198912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/zos/gr/v20190826/zos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198501-198912.nc' 'SHA256' '86b2c13e57b1ac64c4d67946853e056dcf3c7c08377107c48cd12d85580f9203'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188501-188912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188501-188912.nc' 'SHA256' '23e13dd10ee34040080c46b6632a6aa931fb750d2008b5b05ee821bb3aa29379'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195001-195412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195001-195412.nc' 'SHA256' '0d94999b87b8162bd1b01c268d17ad11d5b77f77d97d9bafa06e959069abce8d'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185001-185412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_185001-185412.nc' 'SHA256' 'd27a616b2fbc3e2a5af7725c3e00e3cafe5e6a50a2b5269799d8de2a99860526'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188501-188912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188501-188912.nc' 'SHA256' '3ae44bf3cde70a04a61e4dce3238afa558cb6acd55243e972260224b11e0ccf8'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199001-199412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199001-199412.nc' 'SHA256' '74caf5379b95529d37705182a56e99956a697dd7b0a3a3705c947bab73f30faf'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195001-195412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195001-195412.nc' 'SHA256' 'b3cdbd3a0be6976d1631272bc359d2b0e6f1f7590e8476e6e0a23d5ccef8abf1'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188001-188412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_188001-188412.nc' 'SHA256' '574280d838faa85515b001945b1827aab399da16cb96f883c8da041d9bf5bc35'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190001-190412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190001-190412.nc' 'SHA256' 'de3b4913dbbc6fd69bae2592f19cc4252f0e2ff3bbd70e37fd51a3521dd607ac'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186001-186412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186001-186412.nc' 'SHA256' '4f8fc0e5474679e3071a3b0a5233c1596596101778cfc83a1d47fe85f1ba0fb6'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186501-186912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186501-186912.nc' 'SHA256' 'ca4b943f8b165f3e8107f53ac96101d6420e9b38d8fa005e962be04cfe68bf1c'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199501-199912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199501-199912.nc' 'SHA256' 'bc6f298f5aa8e25fa37edf958eb9b1b9d8dd7be1eda708640c8c50db6d61d469'
+'so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195001-195412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/so/gr/v20221114/so_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195001-195412.nc' 'SHA256' '644ea398f3dc4b85597f14cdaa6746c4e94430051bdfca5fd8686e0df94a6926'
+'tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185001-185912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauvo/gr/v20221112/tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185001-185912.nc' 'SHA256' '85e4b23e6d1e521157055735663328d11cd00613a4f145bedc98369ffeb938ee'
+'tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197001-197912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauvo/gr/v20221112/tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197001-197912.nc' 'SHA256' 'ba13d26d85e20006b4c0142f17c2326c27c12a7ee0337eb4d3f2c10eb142ef7c'
+'tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198001-198912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauvo/gr/v20221112/tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198001-198912.nc' 'SHA256' 'd4c7d5488377e3382f044898b122971da49ae0c8208cda4f35d0136053c5a1a9'
+'tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188001-188912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tos/gr/v20221112/tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188001-188912.nc' 'SHA256' '79b6d6d609180bcdc5c2c057d5e59251e91872c5b6119a08a78312fe63e3bfb6'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194501-194912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_194501-194912.nc' 'SHA256' 'f5805bc3f05a0cfcbd6651d779c5e7038c245fd9082ccb9705b0fb72fac3c4c9'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195001-195412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195001-195412.nc' 'SHA256' 'd37efd740063af60eb2dcd7a0bb64d77cfa04bf22d65f62a8d196172c34387f9'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186001-186412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186001-186412.nc' 'SHA256' '20b118805cf48e81d46c1078bb06ad75a70c96d27d300d8ec3bab1dab1cd016a'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187001-187412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187001-187412.nc' 'SHA256' 'cccfbcb6e78d1394b8429d44a92dca2f86fe301d90f6aaca71b118b03c549da2'
+'so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197501-197912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/so/gr/v20190826/so_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197501-197912.nc' 'SHA256' '81da8e36d5e95b07fefd5ab3a808c0872aa79217efc3969c01f88701533dc37b'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189501-189912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189501-189912.nc' 'SHA256' 'dd20dcda13a990ff3dffbca4363a22e5ef1045b24e8fafd0a9f8936e593c97ee'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199501-199912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199501-199912.nc' 'SHA256' '529167fe49c1bab26b110c84958d1d91b5c448ef533a828d53737310a89e945e'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185501-185912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185501-185912.nc' 'SHA256' 'a06b7a84b4f9c5f6a764b18c03dab84089b7f4176058109b5f99d1088c3d818e'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197001-197412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_197001-197412.nc' 'SHA256' 'cc124b39af387c2c01dc969057b7d96b8e1334b151103d54030753bd19a75fae'
+'tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193001-193412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tos/gr/v20190826/tos_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193001-193412.nc' 'SHA256' '42876d8355677b1dd85832cb92f1d72507fac6151605d66ddbfca794ff7a3999'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186501-186912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_186501-186912.nc' 'SHA256' '0fd15a0d530e0cd84b94bfea4919508b14b798329368b0bc6e13d3fc1e0650cb'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189001-189412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189001-189412.nc' 'SHA256' '799f8ddc745f3ca82c9f3d2ba1f2cd71a31b92b1af01b359bd43ab97b9b26187'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190001-190412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190001-190412.nc' 'SHA256' 'f229e6dc9eae3b0fae81957e3d778cab670fb9951c66f93e83b682588de9ab08'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191501-191912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191501-191912.nc' 'SHA256' '3932416f6dc47182415b82d00b08d3faf308fb59d159a2a92ef76d3daa4f576c'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193501-193912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193501-193912.nc' 'SHA256' '962c7d11f2465fc0b98e282bee5039b94384292fcb638754e5ba516a624f6c10'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196501-196912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_196501-196912.nc' 'SHA256' 'a59c4889a91aba389151a1af40a848fe38aa4abe2d85916f8193559ee51ad775'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198001-198412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198001-198412.nc' 'SHA256' '5265b9b915a67f3cf3dbf3817dabcaab1720d69ca1852e822f7fd92778928486'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_201001-201412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' 'd8de24355ec76cbeb31abb4cbbd0470d3775767cc36b62b626f9c72b15d89c0f'
+'so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194501-194912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/so/gr/v20191204/so_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194501-194912.nc' 'SHA256' '636fb29e406d434d50d0796f646735cf2a17fabb9f104149b4869807ffb7081a'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187501-187912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187501-187912.nc' 'SHA256' '8d538114d7bcc765b90f893f202b230a6f9ce5388cbc5c7ce481deb826b0bf56'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196501-196912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196501-196912.nc' 'SHA256' 'c1a64d99e956a643778c71fa15f2800933f1efc6fdf566e3718f8899b9b57845'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192001-192412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192001-192412.nc' 'SHA256' 'fade9b67d96b8dcd1457a36cb88e87f79196f5876109dcb36684dc9b54fdf794'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191501-191912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191501-191912.nc' 'SHA256' '3d934274a24569cdb27123d921cb6e7dce4dcd992e32711c521116d14455989c'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195001-195412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195001-195412.nc' 'SHA256' '278c2e4ffc65b2895e54277e5038a08bbb9a592ef6ca19a8389899598feeab37'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187501-187912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187501-187912.nc' 'SHA256' '1ae7e6086cff69761bd26e33b9c82554c7b93dbbbdc543cd0195eb086b20acc2'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196001-196412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196001-196412.nc' 'SHA256' 'db8f28f25e23fa981b255cdfd869db8aa1d2de1defd139ad90cbedb9a0813c23'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194501-194912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194501-194912.nc' 'SHA256' '4d2fe7278d93a8b8825377224dbada81ccb895f34941726a71820c4736c34348'
+'zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196001-196412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/zos/gr/v20191204/zos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196001-196412.nc' 'SHA256' '568de6be689339f0ea9116e512a9ba8b001adb3fc539086586f22a4d88002c67'
+'tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188001-188912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauvo/gr/v20221112/tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188001-188912.nc' 'SHA256' '7583a2509db10d8328f44353d54d4bda9b21c4e69fdab600eba70d86362a6d76'
+'tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189001-189912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauvo/gr/v20221112/tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_189001-189912.nc' 'SHA256' '2157a6e343dbbc070c6f1c04d0f8f05fa1202916fbf7c268bf097349e62795aa'
+'tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196001-196912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauvo/gr/v20221112/tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196001-196912.nc' 'SHA256' '98a4f0110d23411d6a142e14fe566eed502273010c3958bb190c600cc586a0b9'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196501-196912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196501-196912.nc' 'SHA256' '9ea06e9f923491aedaf8532bad8892b22299ae3d009f07791123c9f68e1e3309'
+'tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191001-191912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tos/gr/v20221112/tos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191001-191912.nc' 'SHA256' '5ce75a9a49b019f3a585f0c87f50bddeca8828dbe663cb8812cef2f856407c67'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196001-196412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_196001-196412.nc' 'SHA256' 'e7b5e7faf0feb9a9dd5d64a309f2206697034176d6709fe53327d6e07fb44844'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200001-200412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200001-200412.nc' 'SHA256' 'bd831cd2b8d8e6aead5ed42bb4fedbb859bf23c292c6f50d9fc11aa2f3995fd1'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188001-188412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188001-188412.nc' 'SHA256' '3fc30c05d641255d908688782148d220ea694f5569d6c39d32cdb568146368bd'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191501-191912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_191501-191912.nc' 'SHA256' '2a8c3cab2ed8ac40500060835c415cdc43aa77bf3fdbbdd5149d2d11dec24fa0'
+'zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186001-186912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/zos/gr/v20221112/zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_186001-186912.nc' 'SHA256' '42b8362dc53da3bb28c3687793dead050c04266c66380ac40ef98f7948f47278'
+'zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188001-188912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/zos/gr/v20221112/zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_188001-188912.nc' 'SHA256' '4d86dbd5ac110c3b1fecc92126c2ee94e9c577715d1695e17f3b715e0d50545b'
+'zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195001-195912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/zos/gr/v20221112/zos_Omon_E3SM-2-0_historical_r1i1p1f1_gr_195001-195912.nc' 'SHA256' 'bcf53f2eddd0e518dd3766bfad3349404aa43f30f5aba03a0bc098c731d665dc'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188501-188912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188501-188912.nc' 'SHA256' '5eff081024e55a336e984eae69e6705908f0adbb85ef42546368d8a3b312f1b3'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193501-193912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_193501-193912.nc' 'SHA256' 'ff5245eb60d92ce6dc2b25c463037a50e0f157b03b261d656931fab2ac015f34'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200501-200912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_200501-200912.nc' 'SHA256' '523504bb5474e128a982c0c157a68cf79c06da777c32e0bf54f1e054d74e92c9'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188501-188912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188501-188912.nc' 'SHA256' 'b4cef5af014782bf719b0b202f1c81de68c86ea929ea2e85f0947747bf0bf3f3'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195001-195412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_195001-195412.nc' 'SHA256' 'bcd0c10d68dfb5129282fa40ab29eb729086b6ca2c45dd048f302e00e2eb0486'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199001-199412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_199001-199412.nc' 'SHA256' 'f72e8af719d413c424f9d68c87c4b4eaf0d958e53585597a74658a1e8b657407'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190001-190412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_190001-190412.nc' 'SHA256' '0a2854ca4ba9b424a048668f43046f5bccce549ebb75c1643ac5d36996a0de0e'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198501-198912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_198501-198912.nc' 'SHA256' 'cbe18407b0461a8de54c66b2dfd7e7569e8bd7c15369d6bbab568a30bd63df45'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189501-189912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189501-189912.nc' 'SHA256' '42f21f8e31204af2e7b69baa864263b89d1dd85094fc2c4e1b0da63b5f0d778b'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192501-192912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192501-192912.nc' 'SHA256' 'd4aeedde3e2c67ba4affa07de6b7ac886a36e4f9b4bb2069bc4bdd7f085aa4eb'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186501-186912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186501-186912.nc' 'SHA256' '8e509b0f2fc0cd50efc69c67e0c938a0f17e04eccacc800f6fac1bba510cc063'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187501-187912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187501-187912.nc' 'SHA256' 'd1cfbff8d053c6525598cd09a34ca028cc9d0ffe1e777cf3f367acc8558e4e40'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190501-190912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_190501-190912.nc' 'SHA256' '5fc2ef67f33c129a3344e40ec96567d4d2afeb0718f64affa3e44dd543f7768c'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193001-193412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193001-193412.nc' 'SHA256' '7e5bee65db89fc14ef4a604cf6d60be8ebb0b717cc45a1db806bc14b61f5fcf5'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194001-194412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_194001-194412.nc' 'SHA256' '97ea16a8d70d5d1007d738bd9535a93d3bf14d54186e0cd8860e857c0d8368a8'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195501-195912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195501-195912.nc' 'SHA256' '5d26d95a3e8bf3904d4d95c4a221d5a0c44231b02ae14b75f3501adec29e64ce'
+'thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186001-186412.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/thetao/gr/v20191204/thetao_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186001-186412.nc' 'SHA256' 'eeb58161edd8629e3a52a79328a25b959d43ba30da9ad56819bc09bf03e08df6'
+'tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186501-186912.nc' 'http://esgf-data04.diasjp.net/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tos/gr/v20191204/tos_Omon_E3SM-1-1_historical_r1i1p1f1_gr_186501-186912.nc' 'SHA256' 'b625a162cec4cfa6bec206022e122d6e8c963cd5eefec6beaa498c0a675435d9'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187001-187412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_187001-187412.nc' 'SHA256' 'a9a54a6797a55559b4c5d4e2ee0658650ddc78f5110f62cf23834f5f366498e8'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189501-189912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_189501-189912.nc' 'SHA256' '3174110e0970623837f385b3890800d81a7937b29a1298d719b68bd697290afb'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192001-192412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_192001-192412.nc' 'SHA256' 'efc02ff6b7781a221455c38bb78feb5fa726ca3f6812c68570fdf11604f20606'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195001-195412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195001-195412.nc' 'SHA256' '28a802af74dd759ee041697a67fc6c9bcce6f214e007da4a25c4e8d29171c5bb'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196001-196412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196001-196412.nc' 'SHA256' 'cdfccf6abf2bc4c21514b4799ea237f70027bdfa9e0861a731d0ce7baefca11f'
+'tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_201001-201412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauvo/gr/v20221112/tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_201001-201412.nc' 'SHA256' '1ac48b68324f1bcc981388fb5ef61ee2e2fdc502ef44e6e0362ea7662414b557'
+'thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198001-198412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/thetao/gr/v20221114/thetao_Omon_E3SM-2-0_historical_r1i1p1f1_gr_198001-198412.nc' 'SHA256' '29b98defeac7510b7f74d577e57e1b58830bf0a7e3beca89dada086ad54af980'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190001-190412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_190001-190412.nc' 'SHA256' 'dd8156696eb2f960c83f987d59100c2cf2a874587ae15b87b458bcd421abafa2'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196001-196412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_196001-196412.nc' 'SHA256' '2399d878cd9d82b8d3293834995c2ddc47e64cbf4bbb9a9ac94e49803521d15b'
+'tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199001-199412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauuo/gr/v20191204/tauuo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_199001-199412.nc' 'SHA256' '51c723ad9ae0c5afce377c663175191ca9d102f2a18ef84a1d34b91be79368a7'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195001-195412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_195001-195412.nc' 'SHA256' '6f17c8530736d90aab694cc9e7d394a7af703c30ce73d4fea90c485c66851825'
+'tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198501-198912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/tauvo/gr/v20191204/tauvo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_198501-198912.nc' 'SHA256' 'ac2fdbf4f2202855498ba9bf9105e3f187fd3a11cc9b0162e79e32210e734053'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191001-191412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191001-191412.nc' 'SHA256' '79d7aa6c9f12b90ba03303d882c686eb489d8c0227bc9b946179755e916dadd1'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191501-191912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_191501-191912.nc' 'SHA256' '9a121c4c7963634e8863149adc359b65bb960f585a3438f88ddf176c52d64563'
+'uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193501-193912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/uo/gr/v20191204/uo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_193501-193912.nc' 'SHA256' '2a6fb2417aa3ca2d337d3403224182012de9f0d24d92bebe9d2fa9f912ada9e6'
+'vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197001-197412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-1/historical/r1i1p1f1/Omon/vo/gr/v20191204/vo_Omon_E3SM-1-1_historical_r1i1p1f1_gr_197001-197412.nc' 'SHA256' '93341646eb6a46b99205821cb4e8af9f8deaa34d958a567b90a9464c1b75fcf5'
+'tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185501-185912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauuo/gr/v20190826/tauuo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_185501-185912.nc' 'SHA256' '27a75fb0e840ebb0175d01cc64ab1689e0697ea989af4775297f58306937962a'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189001-189412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_189001-189412.nc' 'SHA256' 'f45f386197a405ef30d3807389609505bfa245187b59151051ec537fc1aecf97'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191001-191412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191001-191412.nc' 'SHA256' '9a5107f59d7497c57cc73f070000c2a6c4de67aa0a18a91c7195334f5e8de78d'
+'tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191501-191912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/tauvo/gr/v20190826/tauvo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_191501-191912.nc' 'SHA256' 'aaac37e2e7bf84f133969337698c56c525a6cb8706029accc9da2b787efa61ce'
+'uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194001-194412.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/uo/gr/v20190826/uo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_194001-194412.nc' 'SHA256' '3c387c8699f997624981758522082267c4c2530465bb64da78bb51aed4438ada'
+'vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188501-188912.nc' 'http://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-1-0/historical/r1i1p1f1/Omon/vo/gr/v20190826/vo_Omon_E3SM-1-0_historical_r1i1p1f1_gr_188501-188912.nc' 'SHA256' 'd4cac88b82c06c6058c5963edee078631025b8539ccf8a46f7c52f5292b4a9d4'
+'tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199001-199912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauuo/gr/v20221112/tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_199001-199912.nc' 'SHA256' 'b31706bb4e34862088211a7d897dba9aa920209414a56836372953ea0f172453'
+'tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200001-200912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauuo/gr/v20221112/tauuo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200001-200912.nc' 'SHA256' '298338691cb4dab499ff781e2d4feaffacecb4ed8e3b18971859de41ea47589f'
+'tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187001-187912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/tauvo/gr/v20221112/tauvo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_187001-187912.nc' 'SHA256' '0d86201d3fffbe42cf8f9a67885d9126bc3b74c88686e41d881361f5bd547b6b'
+'uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200501-200912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/uo/gr/v20221114/uo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_200501-200912.nc' 'SHA256' '661ee1535a9186d50462f40b57996f63befdaefe488bcf1374a95fb40ba7a1c6'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185001-185412.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_185001-185412.nc' 'SHA256' '356d9553bb6947e4599a1a84bc96880ebc01d1415e7add9aab49f5d7b6b70289'
+'vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197501-197912.nc' 'https://esgf-node.ornl.gov/thredds/fileServer/user_pub_work/CMIP6/CMIP/E3SM-Project/E3SM-2-0/historical/r1i1p1f1/Omon/vo/gr/v20221115/vo_Omon_E3SM-2-0_historical_r1i1p1f1_gr_197501-197912.nc' 'SHA256' '683deaad1bbc9c29a1585e54c79f57f8b09772891831dd8ffc97f3fc76a4a36f'
+EOF--dataset.file.url.chksum_type.chksum
+)"
+# ========== 工具函数 ==========
+
+# 颜色输出
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+log_info() { echo -e "${BLUE}[INFO]${NC} $*"; }
+log_success() { echo -e "${GREEN}[SUCCESS]${NC} $*"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
+
+# 检查系统
+check_os() {
+    local os_name=$(uname | awk '{print $1}')
+    case ${os_name} in
+        Linux) LINUX=1; MACOSX=0;;
+        Darwin) LINUX=0; MACOSX=1;;
+        *) log_error "不支持的操作系统: ${os_name}"; return 1;;
+    esac
+    return 0
+}
+
+# 检查并安装aria2
+check_aria2() {
+    if command -v aria2c &> /dev/null; then
+        local aria2_version=$(aria2c --version | head -1)
+        log_info "检测到 $aria2_version"
+        return 0
+    fi
+    
+    log_warn "未检测到aria2，尝试安装..."
+    
+    if ((LINUX)); then
+        if command -v apt-get &> /dev/null; then
+            sudo apt-get update && sudo apt-get install -y aria2
+        elif command -v yum &> /dev/null; then
+            sudo yum install -y aria2
+        elif command -v dnf &> /dev/null; then
+            sudo dnf install -y aria2
+        elif command -v pacman &> /dev/null; then
+            sudo pacman -S aria2
+        else
+            log_error "无法自动安装aria2，请手动安装:  https://aria2.github.io/"
+            return 1
+        fi
+    elif ((MACOSX)); then
+        if command -v brew &> /dev/null; then
+            brew install aria2
+        else
+            log_error "请先安装Homebrew，然后运行: brew install aria2"
+            return 1
+        fi
+    fi
+    
+    if command -v aria2c &> /dev/null; then
+        log_success "aria2安装成功"
+        return 0
+    else
+        log_error "aria2安装失败"
+        return 1
+    fi
+}
+
+# 测试镜像节点速度
+test_mirror_speed() {
+    local url=$1
+    local timeout=5
+    local start_time=$(date +%s%3N)
+    
+    # 使用curl测试连��速度（下载1字节）
+    if curl -s -o /dev/null -w "%{time_connect}" --connect-timeout $timeout -r 0-0 "$url" 2>/dev/null; then
+        local end_time=$(date +%s%3N)
+        echo $((end_time - start_time))
+    else
+        echo 99999
+    fi
+}
+
+# 自动选择最快镜像
+select_fastest_mirror() {
+    local original_url=$1
+    local fastest_url=$original_url
+    local fastest_time=99999
+    
+    log_info "测试镜像节点速度..."
+    
+    for node in "${MIRROR_NODES[@]}"; do
+        # 替换原始URL中的节点
+        local test_url=$(echo "$original_url" | sed "s|://[^/]*/|://${node}/|")
+        local time=$(test_mirror_speed "$test_url")
+        
+        ((debug)) && echo "  $node: ${time}ms"
+        
+        if ((time < fastest_time)); then
+            fastest_time=$time
+            fastest_url=$test_url
+        fi
+    done
+    
+    if [[ "$fastest_url" != "$original_url" ]]; then
+        log_info "选择最快镜像: $(echo "$fastest_url" | grep -oP '://\K[^/]+')"
+    fi
+    
+    echo "$fastest_url"
+}
+
+# 生成多镜像URL列表（aria2支持多源下载）
+generate_mirror_urls() {
+    local original_url=$1
+    local urls=""
+    
+    for node in "${MIRROR_NODES[@]}"; do
+        local mirror_url=$(echo "$original_url" | sed "s|://[^/]*/|://${node}/|")
+        urls+="${mirror_url}\t"
+    done
+    
+    echo -e "$urls"
+}
+
+# SHA256校验（兼容Mac/Linux）
+sha256sum_() {
+    if command -v sha256sum &> /dev/null; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum &> /dev/null; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        sha2 -q -256 "$1"
+    fi
+}
+
+# MD5校验
+md5sum_() {
+    if command -v md5sum &> /dev/null; then
+        md5sum "$1" | awk '{print $1}'
+    else
+        md5 -q "$1"
+    fi
+}
+
+# 校验文件
+verify_checksum() {
+    local file=$1
+    local chksum_type=$2
+    local expected=$3
+    
+    if [[ -z "$expected" ]]; then
+        log_warn "无校验和，跳过验证:  $file"
+        return 0
+    fi
+    
+    local actual
+    case ${chksum_type,,} in
+        sha256) actual=$(sha256sum_ "$file");;
+        md5) actual=$(md5sum_ "$file");;
+        *) log_warn "不支持的校验类型: $chksum_type"; return 0;;
+    esac
+    
+    if [[ "$actual" == "$expected" ]]; then
+        return 0
+    else
+        log_error "校验失败: $file"
+        log_error "  期望: $expected"
+        log_error "  实际: $actual"
+        return 1
+    fi
+}
+
+# 获取文件修改时间
+get_mod_time() {
+    if ((MACOSX)); then
+        stat -f %m "$1" 2>/dev/null
+    else
+        stat -c %Y "$1" 2>/dev/null
+    fi
+}
+
+# ========== 下载策略 ==========
+
+# 策略1: aria2单文件高速下载
+download_with_aria2_single() {
+    local file=$1
+    local url=$2
+    local output_dir=$(dirname "$file")
+    local output_file=$(basename "$file")
+    
+    [[ !  -d "$output_dir" ]] && mkdir -p "$output_dir"
+    
+    aria2c \
+        --dir="$output_dir" \
+        --out="$output_file" \
+        --max-connection-per-server=$MAX_CONNECTIONS \
+        --split=$SPLIT \
+        --min-split-size=$MIN_SPLIT_SIZE \
+        --timeout=$TIMEOUT \
+        --max-tries=$MAX_RETRIES \
+        --retry-wait=$RETRY_WAIT \
+        --continue=true \
+        --auto-file-renaming=false \
+        --allow-overwrite=true \
+        --console-log-level=warn \
+        --summary-interval=0 \
+        --file-allocation=none \
+        $([[ $insecure -eq 1 ]] && echo "--check-certificate=false") \
+        "$url"
+    
+    return $?
+}
+
+# 策略2: aria2多镜像并行下载（最快）
+download_with_aria2_mirrors() {
+    local file=$1
+    local url=$2
+    local output_dir=$(dirname "$file")
+    local output_file=$(basename "$file")
+    
+    [[ ! -d "$output_dir" ]] && mkdir -p "$output_dir"
+    
+    # 生成多镜像URL列表
+    local mirror_urls=$(generate_mirror_urls "$url")
+    
+    aria2c \
+        --dir="$output_dir" \
+        --out="$output_file" \
+        --max-connection-per-server=$MAX_CONNECTIONS \
+        --split=$SPLIT \
+        --min-split-size=$MIN_SPLIT_SIZE \
+        --timeout=$TIMEOUT \
+        --max-tries=$MAX_RETRIES \
+        --retry-wait=$RETRY_WAIT \
+        --continue=true \
+        --auto-file-renaming=false \
+        --allow-overwrite=true \
+        --console-log-level=warn \
+        --summary-interval=0 \
+        --file-allocation=none \
+        $([[ $insecure -eq 1 ]] && echo "--check-certificate=false") \
+        $mirror_urls
+    
+    return $?
+}
+
+# 策略3: aria2批量并行下载（处理整个文件列表）
+download_batch_aria2() {
+    local input_list=$1
+    local temp_input=$(mktemp)
+    
+    # 生成aria2输入文件格式
+    while IFS= read -r line; do
+        [[ "$line" =~ ^(#|\.\.\.) ]] && continue
+        [[ -z "$line" ]] && continue
+        
+        eval $(awk -F "' '" '{$0=substr($0,2,length($0)-2); print "file=\""$1"\";url=\""$2"\""}' <(echo "$line"))
+        
+        # 跳过已完成的文件
+        if [[ -f "$file" ]] && grep -q "^$file " "$CACHE_FILE" 2>/dev/null; then
+            ((verbose)) && log_info "跳过已完成:  $file"
+            continue
+        fi
+        
+        local output_dir=$(dirname "$file")
+        local output_file=$(basename "$file")
+        
+        # 写入aria2输入格式
+        echo "$url"
+        echo "  dir=$output_dir"
+        echo "  out=$output_file"
+        
+    done <<< "$input_list" > "$temp_input"
+    
+    if [[ !  -s "$temp_input" ]]; then
+        log_success "所有文件已下载完成"
+        rm -f "$temp_input"
+        return 0
+    fi
+    
+    log_info "开始批量下载 (并发数: $MAX_CONCURRENT, 单文件连接数: $MAX_CONNECTIONS)"
+    
+    aria2c \
+        --input-file="$temp_input" \
+        --max-concurrent-downloads=$MAX_CONCURRENT \
+        --max-connection-per-server=$MAX_CONNECTIONS \
+        --split=$SPLIT \
+        --min-split-size=$MIN_SPLIT_SIZE \
+        --timeout=$TIMEOUT \
+        --max-tries=$MAX_RETRIES \
+        --retry-wait=$RETRY_WAIT \
+        --continue=true \
+        --auto-file-renaming=false \
+        --allow-overwrite=true \
+        --save-session="$ARIA2_SESSION" \
+        --save-session-interval=10 \
+        --file-allocation=none \
+        $([[ -f "$ARIA2_SESSION" ]] && echo "--input-file=$ARIA2_SESSION") \
+        $([[ $insecure -eq 1 ]] && echo "--check-certificate=false") \
+        $([[ $quiet -eq 1 ]] && echo "--console-log-level=error" || echo "--console-log-level=notice") \
+        --log="$DOWNLOAD_LOG" \
+        --log-level=notice
+    
+    local result=$?
+    rm -f "$temp_input"
+    return $result
+}
+
+# ========== 主下载流程 ==========
+
+download_and_verify() {
+    local total=0
+    local success=0
+    local failed=0
+    local skipped=0
+    
+    # 统计文件数量
+    while IFS= read -r line; do
+        [[ "$line" =~ ^(#|\.\.\.) ]] && continue
+        [[ -z "$line" ]] && continue
+        ((total++))
+    done <<< "$download_files"
+    
+    log_info "共 $total 个文件待处理"
+    
+    # 使用批量下载模式
+    if ((batch_mode)); then
+        download_batch_aria2 "$download_files"
+    fi
+    
+    # 逐个处理（下载+校验）
+    local current=0
+    while IFS= read -r line; do
+        [[ "$line" =~ ^(#|\.\.\.) ]] && continue
+        [[ -z "$line" ]] && continue
+        
+        ((current++))
+        
+        eval $(awk -F "' '" '{$0=substr($0,2,length($0)-2); $3=tolower($3); print "file=\""$1"\";url=\""$2"\";chksum_type=\""$3"\";chksum=\""$4"\""}' <(echo "$line"))
+        
+        echo -e "\n${BLUE}[$current/$total]${NC} $file"
+        
+        # 检查缓存
+        local cached=$(grep "^$file " "$CACHE_FILE" 2>/dev/null)
+        if [[ -f "$file" && -n "$cached" ]]; then
+            local cached_mtime=$(echo "$cached" | awk '{print $2}')
+            local current_mtime=$(get_mod_time "$file")
+            local cached_chksum=$(echo "$cached" | awk '{print $3}')
+            
+            if [[ "$current_mtime" == "$cached_mtime" && "$cached_chksum" == "$chksum" ]]; then
+                log_success "已下载并验证"
+                ((skipped++))
+                continue
+            fi
+        fi
+        
+        # 下载文件
+        local download_success=0
+        for attempt in $(seq 1 $MAX_RETRIES); do
+            if ((attempt > 1)); then
+                log_warn "重试 ($attempt/$MAX_RETRIES)..."
+                sleep $RETRY_WAIT
+            fi
+            
+            if ((use_mirrors)); then
+                download_with_aria2_mirrors "$file" "$url" && download_success=1 && break
+            else
+                download_with_aria2_single "$file" "$url" && download_success=1 && break
+            fi
+        done
+        
+        if ((download_success == 0)); then
+            log_error "下载失败:  $file"
+            ((failed++))
+            continue
+        fi
+        
+        # 校验文件
+        if ((skip_checksum == 0)); then
+            if verify_checksum "$file" "$chksum_type" "$chksum"; then
+                log_success "校验通过"
+                # 更新缓存
+                grep -v "^$file " "$CACHE_FILE" > "${CACHE_FILE}.tmp" 2>/dev/null
+                mv "${CACHE_FILE}.tmp" "$CACHE_FILE"
+                echo "$file $(get_mod_time "$file") $chksum" >> "$CACHE_FILE"
+                ((success++))
+            else
+                log_error "校验失败，删除文件"
+                rm -f "$file"
+                ((failed++))
+            fi
+        else
+            log_warn "跳过校验"
+            ((success++))
+        fi
+        
+    done <<< "$download_files"
+    
+    echo ""
+    log_info "========== 下载统计 =========="
+    log_info "总计: $total"
+    log_success "成功: $success"
+    log_info "跳过: $skipped"
+    [[ $failed -gt 0 ]] && log_error "失败: $failed"
+}
+
+# ========== 帮助信息 ==========
+
+usage() {
+    cat <<EOF
+CMIP6 高速下载脚本 - 中国大陆优化版 v$version
+
+使用方法:  $(basename $0) [选项]
+
+核心选项: 
+    -j <num>    最大并发下载数 (默认: $MAX_CONCURRENT)
+    -x <num>    单文件最大连接数 (默认: $MAX_CONNECTIONS)
+    -s <num>    单文件分片数 (默认:  $SPLIT)
+    
+下载选项: 
+    -F <file>   从文件读取URL列表 (-表示标准输入)
+    -w <file>   导出嵌入式文件列表并退出
+    -m          启用多镜像并行下载 (最快)
+    -b          启用批量下载模式
+    -i          不检查SSL证书
+    
+验证选项: 
+    -S          跳过校验和验证
+    -p          保留校验失败的文件
+    
+其他选项: 
+    -n          干跑模式，不实际下载
+    -d          调试模式
+    -v          详细输出
+    -q          静默模式
+    -h          显示帮助
+
+示例:
+    # 使用多镜像加速下载（推荐）
+    $(basename $0) -m -j 8 -x 16
+    
+    # 批量下载模式
+    $(basename $0) -b -j 16
+    
+    # 从文件读取URL
+    $(basename $0) -F urls.txt -m
+    
+    # 跳过SSL验证（某些节点证书问题）
+    $(basename $0) -m -i
+
+提示:
+    1.中国大陆用户推荐使用 -m 选项启用多镜像下载
+    2.澳大利亚NCI节点(esgf.nci.org.au)通常对亚太区访问较快
+    3.如遇证书问题，使用 -i 选项跳过验证
+    4.aria2会自动断点续传，中断后重新运行即可继续
+
+EOF
+}
+
+# ========== 参数解析 ==========
+
+debug=0
+verbose=0
+quiet=0
+insecure=0
+skip_checksum=0
+clean_work=1
+dry_run=0
+use_mirrors=0
+batch_mode=0
+input_file=""
+output=""
+
+while getopts 'F:w:j:x: s:mbiSnpdvqh' OPT; do
+    case $OPT in
+        F) input_file="$OPTARG";;
+        w) output="$OPTARG";;
+        j) MAX_CONCURRENT="$OPTARG";;
+        x) MAX_CONNECTIONS="$OPTARG";;
+        s) SPLIT="$OPTARG";;
+        m) use_mirrors=1;;
+        b) batch_mode=1;;
+        i) insecure=1;;
+        S) skip_checksum=1;;
+        n) dry_run=1;;
+        p) clean_work=0;;
+        d) verbose=1; debug=1;;
+        v) verbose=1;;
+        q) quiet=1;;
+        h) usage && exit 0;;
+        \?) echo "未知选项: '$OPTARG'" >&2; usage; exit 1;;
+        \: ) echo "选项 '$OPTARG' 缺少参数" >&2; usage; exit 1;;
+    esac
+done
+shift $((OPTIND - 1))
+
+# ========== 主程序 ==========
+
+echo -e "${BLUE}=====================================${NC}"
+echo -e "${BLUE}  CMIP6 高速���载脚本 v$version${NC}"
+echo -e "${BLUE}=====================================${NC}"
+echo ""
+
+# 系统检查
+check_os || exit 1
+check_aria2 || exit 1
+
+# 处理输入文件
+if [[ -n "$input_file" ]]; then
+    if [[ "$input_file" == '-' ]]; then
+        download_files="$(cat)"
+        exec 0</dev/tty
+    else
+        download_files="$(cat "$input_file")"
+    fi
+fi
+
+# 导出文件列表
+if [[ -n "$output" ]]; then
+    echo "$download_files" > "$output"
+    log_success "文件列表已导出到:  $output"
+    exit 0
+fi
+
+# 初始化缓存
+if [[ !  -f "$CACHE_FILE" ]]; then
+    echo "#filename mtime checksum" > "$CACHE_FILE"
+fi
+
+# 显示配置
+log_info "下载配置:"
+log_info "  并发数: $MAX_CONCURRENT"
+log_info "  单文件连接数: $MAX_CONNECTIONS"
+log_info "  分片数: $SPLIT"
+log_info "  多镜像模式: $([[ $use_mirrors -eq 1 ]] && echo '开启' || echo '关闭')"
+log_info "  批量模式:  $([[ $batch_mode -eq 1 ]] && echo '开启' || echo '关闭')"
+echo ""
+
+# 执行下载
+if ((dry_run)); then
+    log_warn "干跑模式，不实际下载"
+else
+    download_and_verify
+fi
+
+log_success "下载任务完成!"

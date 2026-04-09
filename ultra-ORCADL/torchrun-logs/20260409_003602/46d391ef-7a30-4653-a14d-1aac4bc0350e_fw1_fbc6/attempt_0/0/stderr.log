@@ -1,0 +1,20 @@
+Traceback (most recent call last):
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/train.py", line 6, in <module>
+      File "<frozen importlib._bootstrap>", line 1075, in _handle_fromlist
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/transformers/utils/import_utils.py", line 1136, in __getattr__
+    module = self._get_module(self._class_to_module[name])
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/transformers/utils/import_utils.py", line 1146, in _get_module
+    return importlib.import_module("." + module_name, self.__name__)
+  File "/root/miniconda3/envs/orca/lib/python3.10/importlib/__init__.py", line 126, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/transformers/trainer_utils.py", line 44, in <module>
+    import torch
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/__init__.py", line 1750, in <module>
+    from . import _meta_registrations
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/_meta_registrations.py", line 712, in <module>
+    @register_meta(aten.linalg_inv_ex.default)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/_ops.py", line 674, in __getattr__
+    overload = OpOverload(self, op_, op_dk_, schema, tags)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/_ops.py", line 407, in __init__
+    super().__init__()
+KeyboardInterrupt

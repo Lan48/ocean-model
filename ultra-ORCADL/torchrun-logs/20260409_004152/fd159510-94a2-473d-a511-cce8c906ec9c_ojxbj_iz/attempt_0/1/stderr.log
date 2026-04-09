@@ -1,0 +1,44 @@
+/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/functional.py:504: UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at ../aten/src/ATen/native/TensorShape.cpp:3526.)
+  return _VF.meshgrid(tensors, **kwargs)  # type: ignore[attr-defined]
+/root/miniconda3/envs/orca/lib/python3.10/site-packages/transformers/optimization.py:391: FutureWarning: This implementation of AdamW is deprecated and will be removed in a future version. Use the PyTorch implementation torch.optim.AdamW instead, or set `no_deprecation_warning=True` to disable this warning
+  warnings.warn(
+/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/utils.py:166: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  storage = elem.storage()._new_shared(numel, device=elem.device)
+/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/utils.py:166: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  storage = elem.storage()._new_shared(numel, device=elem.device)
+/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/utils.py:166: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  storage = elem.storage()._new_shared(numel, device=elem.device)
+/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/utils.py:166: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  storage = elem.storage()._new_shared(numel, device=elem.device)
+/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/utils/checkpoint.py:429: UserWarning: torch.utils.checkpoint: please pass in use_reentrant=True or use_reentrant=False explicitly. The default value of use_reentrant will be updated to be False in the future. To maintain current behavior, pass use_reentrant=True. It is recommended that you use use_reentrant=False. Refer to docs for more details on the differences between the two variants.
+  warnings.warn(
+/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/utils/checkpoint.py:61: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+Traceback (most recent call last):
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/train.py", line 213, in <module>
+    main()
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 346, in wrapper
+    return f(*args, **kwargs)
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/train.py", line 187, in main
+    train_result = trainer.train(resume_from_checkpoint=checkpoint)
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/trainer.py", line 433, in train
+    return inner_training_loop(
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/trainer.py", line 699, in _inner_training_loop
+    tr_loss_step = self.training_step(model, inputs)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/transformers/trainer.py", line 2699, in training_step
+    loss = self.compute_loss(model, inputs)
+  File "/mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/trainer/trainer.py", line 208, in compute_loss
+    outputs = model(**inputs)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1518, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1527, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/parallel/distributed.py", line 1515, in forward
+    inputs, kwargs = self._pre_forward(*inputs, **kwargs)
+  File "/root/miniconda3/envs/orca/lib/python3.10/site-packages/torch/nn/parallel/distributed.py", line 1409, in _pre_forward
+    if torch.is_grad_enabled() and self.reducer._rebuild_buckets():
+RuntimeError: Expected to have finished reduction in the prior iteration before starting a new one. This error indicates that your module has parameters that were not used in producing loss. You can enable unused parameter detection by passing the keyword argument `find_unused_parameters=True` to `torch.nn.parallel.DistributedDataParallel`, and by 
+making sure all `forward` function outputs participate in calculating loss. 
+If you already have done the above, then the distributed data parallel module wasn't able to locate the output tensors in the return value of your module's `forward` function. Please include the loss function and the structure of the return value of `forward` of your module when reporting this issue (e.g. list, dict, iterable).
+Parameter indices which did not receive grad for rank 1: 9 10 11 12 13 14 15 16 29 30 31 32 41 42 43 44 45 46 47 48 61 62 63 64 73 74 75 76 77 78 79 80 93 94 95 96 105 106 107 108 109 110 111 112 125 126 127 128 137 138 139 140 141 142 143 144 157 158 159 160 169 170 171 172 173 174 175 176 189 190 191 192 204 205 206 207 208 209 210 211 224 225 226 227 236 237 238 239 240 241 242 243 256 257 258 259 271 272 273 274 ...
+ In addition, you can set the environment variable TORCH_DISTRIBUTED_DEBUG to either INFO or DETAIL to print out information about which particular parameters did not receive gradient on this rank as part of this error

@@ -16,6 +16,41 @@ from trainer import (
 
 logger = logging.getLogger(__name__)
 
+def setup_layer_wise_optimizer(model, base_lr=2e-5):
+    """使用分层学习率替代冻结"""
+    no_decay = ["bias", "LayerNorm.weight"]
+    
+    optimizer_grouped_parameters = [
+        # 编码器部分 - 极低学习率（相当于"软冻结"）
+        {
+            "params": [p for n, p in model.enc_ocean.named_parameters() 
+                      if not any(nd in n for nd in no_decay)],
+            "weight_decay": 0.01,
+            "lr": base_lr * 0.01,  # 只有基础学习率的1%
+        },
+        {
+            "params": [p for n, p in model.enc_atmo.named_parameters() 
+                      if not any(nd in n for nd in no_decay)],
+            "weight_decay": 0.01,
+            "lr": base_lr * 0.01,
+        },
+        # 解码器部分 - 正常学习率
+        {
+            "params": [p for n, p in model.dec_ocean.named_parameters() 
+                      if not any(nd in n for nd in no_decay)],
+            "weight_decay": 0.01,
+            "lr": base_lr,
+        },
+        # 偏置和LayerNorm - 较低学习率
+        {
+            "params": [p for n, p in model.named_parameters() 
+                      if any(nd in n for nd in no_decay)],
+            "weight_decay": 0.0,
+            "lr": base_lr * 0.1,
+        },
+    ]
+    
+    return torch.optim.AdamW(optimizer_grouped_parameters)
 
 def main():
 
@@ -96,6 +131,12 @@ def main():
 
     logger.info(f"Model Config {model.config}")
 
+    # 新增：冻结编码器参数
+    for param in model.enc_ocean.parameters():
+        param.requires_grad = False
+    # 可选：也冻结大气编码器
+    for param in model.enc_atmo.parameters():
+        param.requires_grad = False
 
     trainer = Trainer(
         model=model,

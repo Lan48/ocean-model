@@ -1,0 +1,12 @@
+project="CMIP6"
+activity_id="CMIP"
+experiment_id="historical"
+table_id="Omon"
+frequency="mon"
+latest="true"
+
+# 变量列表 (Synda会自动处理这里的 OR 逻辑)
+variable_id="so tos zos thetao uo vo hfds mlotst rsntds sob sos tob wfo wo tauuo tauvo"
+
+# 模型列表 (Synda会自动处理 OR 逻辑)
+source_id="BCC-CSM2-MR CAS-ESM2-0 CIESM CMCC-CM2-SR5 CMCC-ESM2 CMCC-CM2-HR4 E3SM-1-0 E3SM-1-1 E3SM-2-0 EC-Earth3 EC-Earth3-Veg FGOALS-f3-L FIO-ESM-2-0 HadGEM3-GC31-MM INM-CM5-0 INM-CM4-8 MPI-ESM1-2-HR MRI-ESM2-0 SAM0-UNICON TaiESM1"

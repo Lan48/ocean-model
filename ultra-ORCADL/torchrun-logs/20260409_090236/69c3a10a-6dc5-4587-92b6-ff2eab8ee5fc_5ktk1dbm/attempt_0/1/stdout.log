@@ -1,0 +1,4 @@
+04/09/2026 09:02:43 - WARNING - __main__ - Process global rank: 1, local rank: 1, device: cuda:1, n_gpu: 1, distributed: True, 16-bits: False
+04/09/2026 09:04:30 - WARNING - __main__ - Using target model config defined in /mnt/data/zhu.yishun/ORCA-DL-main/ultra-ORCADL/model_config.json
+04/09/2026 09:04:30 - WARNING - __main__ - Limiting eval dataset from 2280 to 10 samples via MAX_EVAL_SAMPLES.
+04/09/2026 09:04:40 - WARNING - __main__ - Trying to train a model from scratch

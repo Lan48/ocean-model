@@ -1,0 +1,1 @@
+04/09/2026 00:27:35 - WARNING - __main__ - Process global rank: 1, local rank: 1, device: cuda:1, n_gpu: 1, distributed: True, 16-bits: False

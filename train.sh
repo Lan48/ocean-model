@@ -1,21 +1,23 @@
 
 seed=1
-lr='2e-4'
+#lr='2e-4'
+lr='2e-7'  # 从2e-6调整为2e-7
 batch_size=8
-epoch=50
+epoch=10
 input_steps=1
 predict_steps=1
 max_t=6
 input_var_list='so thetao tos uo vo zos'
 
-save_eval_steps=800
+save_eval_steps=100
 
 dist_port=$[12345+$[$RANDOM%12345]]
 
-output_dir=/mnt/data/zhu.yishun/ORCA-DL-main/output # configure your output directory
-data_dir=/mnt/data/zhu.yishun/ORCA-DL-main/data/tdata # replace with your CMIP data directory, e.g., ./download/train_data/
-soda_dir=/mnt/data/zhu.yishun/ORCA-DL-main/data/valid_test_data/SODA # replace with your SODA data directory, e.g., ./download/valid_test_data/SODA2
+output_dir=/mnt/data/zhu.yishun/ORCA-DL-main/output2e-7 # configure your output directory
+data_dir=/mnt/data/zhu.yishun/ORCA-DL-main/data/train_data # replace with your CMIP data directory, e.g., ./download/train_data/
+soda_dir=/mnt/data/zhu.yishun/ORCA-DL-main/data/valid_test_data/SODA2 # replace with your SODA data directory, e.g., ./download/valid_test_data/SODA2
 oras5_dir=/mnt/data/zhu.yishun/ORCA-DL-main/data/valid_test_data/ORAS5 # replace with your ORAS5 data directory e.g., ./download/valid_test_data/ORAS5
+pretrained_model_path="/mnt/data/zhu.yishun/ORCA-DL-main/ori-model"  # 请替换为实际路径
 
 ### If you use SLURM to launch the training script, you can use the following command:
 # node_num=1
@@ -25,13 +27,14 @@ oras5_dir=/mnt/data/zhu.yishun/ORCA-DL-main/data/valid_test_data/ORAS5 # replace
 
 ### Otherwise, you can use torchrun to launch the training script
 
-torchrun --nproc_per_node=1 \
+torchrun --nproc_per_node=2 \
     /mnt/data/zhu.yishun/ORCA-DL-main/train.py \
         --in_chans 16 16 1 16 16 1 \
         --out_chans 16 16 1 16 16 1 \
         --max_t $max_t \
         --atmo_var_list tauu tauv \
         --atmo_dims 2 \
+        --model_path $pretrained_model_path \
         --ignore_mismatched_sizes True \
         --do_train \
         --dist_port $dist_port \
@@ -49,14 +52,14 @@ torchrun --nproc_per_node=1 \
         --save_strategy steps \
         --save_steps $save_eval_steps \
         --save_total_limit 3 \
-        --ddp_find_unused_parameters False \
+        --ddp_find_unused_parameters True \
         --num_train_epochs $epoch \
         --per_device_train_batch_size $batch_size \
         --per_device_eval_batch_size $batch_size \
         --gradient_accumulation_steps 1 \
         --dataloader_num_workers 8 \
         --gradient_checkpointing False \
-        --fsdp "full_shard auto_wrap" \
+        --fsdp "" \
         --learning_rate $lr \
         --weight_decay 0.1 \
         --max_grad_norm 0.0 \
@@ -67,7 +70,7 @@ torchrun --nproc_per_node=1 \
         --warmup_ratio 0.1 \
         --do_eval \
         --valid_data_dir $soda_dir $oras5_dir \
-        --end_year 1980 \
+        --end_year 2010 \
         --evaluation_strategy steps \
         --eval_steps $save_eval_steps \
         --load_best_model_at_end True
